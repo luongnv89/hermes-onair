@@ -41,6 +41,8 @@ ruff check .
 pytest -q          # offline; `pytest -m live` only by hand
 ```
 
+CI status is informational; local `ruff check .` and `pytest -q -m 'not live'` are the gate.
+
 ## Conventions
 
 - Run Hermes only in an isolated `HERMES_HOME` outside `~/.hermes`.
