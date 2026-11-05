@@ -42,6 +42,8 @@ pytest -q          # offline; `pytest -m live` only by hand
                    # (`pytest` exits 5 = no tests yet, until #3 lands)
 ```
 
+CI status is informational; local `ruff check .` and `pytest -q -m 'not live'` are the gate.
+
 ## Conventions
 
 - Run Hermes only in an isolated `HERMES_HOME` outside `~/.hermes`.
