@@ -15,7 +15,7 @@ Evidence: a feasibility spike ran on 2026-11-05 and is at `/home/adminuser/.herm
 - OpenRouter has exactly 2 free speech models:
   - `fish-audio/s2.1-pro-free:free`: MP3, about 2–3 s per sentence, works for EN/FR/VI;
   - `heygen/heygen-voice-1-turbo:free`: headerless PCM at 44.1 kHz 16-bit mono, about 0.7–1.2 s, EN/FR/VI.
-- edge-tts: about 1 s warm, 11 s on a cold first call. Its output is private use only and must never be published.
+- edge-tts: about 1 s warm, 11 s on a cold first call. Its output is for private use only. Delivering it to the requesting user's own chat or session is fine. Never publish it: no public post, plugin catalog entry, demo, or release asset.
 - `tts.provider: onair` through `ctx.register_tts_provider` works with Hermes's real `text_to_speech_tool`.
 - `ctx.llm` resolves to a free model and returned HTTP 429 on 5 of 6 calls, and it ignores length targets.
 - A slash command's `MEDIA:` reply works on the gateway. Desktop tool media renderers only claim AGENT-TOOL output.
@@ -89,7 +89,7 @@ Depends on: Task 2.1
 
 ### Task 3.1: Docs, catalog entry draft and demo script
 Depends on: Task 2.1
-- README: install, setup and config; a "Free means" section (the free OpenRouter models are promotions that may end; edge-tts is unofficial and private use only; engines and fallback); disclosure; privacy.
+- README: install, setup and config; a "Free means" section (the free OpenRouter models are promotions that may end; edge-tts is unofficial and its output is for private use only: delivering it to the requesting user's own chat or session is fine, but never publish it (no public post, plugin catalog entry, demo, or release asset); engines and fallback); disclosure; privacy.
 - A catalog card image, and a draft `plugin-catalog/onair.yaml` matching `~/.hermes/hermes-agent/plugin-catalog/` entries (name, repo, sha, description with disclosure, category voice, capabilities). Do NOT open the catalog PR.
 - `docs/demo.md`: a 90 s demo script with shots: link → episode on Telegram; Agent Standup; Desktop player if done.
 - Acceptance: a fresh install from the README works in an isolated `HERMES_HOME`.

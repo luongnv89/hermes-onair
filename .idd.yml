@@ -57,6 +57,7 @@ resolve:
 
   # Run tests before creating PR
   # Intended command: `ruff check . && pytest -q` (offline; `live` marker off by default)
+  # (`pytest` exits 5 = no tests yet, until #3 lands)
   auto_test: true
 
   # Abort verify phase after N seconds
@@ -137,7 +138,8 @@ autopilot:
   # "aggressive":   auto-merge clean PRs AND merge partial PRs when
   #                 merge_partial=true is also set (see below). Risky —
   #                 only enable on disposable/experimental repos.
-  mode: balanced
+  # conservative until #3 adds lint/test CI
+  mode: conservative
 
   # Allow merging PRs that still have unresolved fixable review issues.
   # Default: false — never merge a partial PR.
@@ -215,7 +217,7 @@ model_suggestion:
   # Suggest a cost-effective model + thinking level per issue, from CursorBench
   # data cached per user in ~/.cache/idd/model-data-<date>.json (shared
   # across all repos, not per-project). When false, silently skipped.
-  enabled: true
+  enabled: false
 
   # Source URL refreshed into the cache on opt-in or via --refresh-model-data
   data_url: "https://cursor.com/cursorbench"
@@ -233,8 +235,9 @@ security:
 
   # Extra regex ORed onto the built-in real-API-key value pattern
   # Prefer prefix + length over identifier + value
-  # OpenRouter keys: OPENROUTER_API_KEY comes from env only, never committed
-  extra_secret_value_pattern: "sk-or-(v1-)?[A-Za-z0-9]{32,}"
+  # Empty on purpose: the built-in `sk-` rule already covers OpenRouter keys
+  # (sk-or-…, sk-or-v1-…)
+  extra_secret_value_pattern: ""
 
   # Paths matching this regex are skipped entirely (fixtures, golden files)
   # Every path it excludes is a path no rule can block — keep it narrow
