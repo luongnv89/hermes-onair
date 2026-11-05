@@ -107,15 +107,23 @@ review:
   auto_merge: false
   confidence_threshold: 80
   run_tests: true
-  check_ci: true
-  # Opt-in: report a terminal CI failure without blocking the review gate.
-  # GitHub exposes no API field naming a billing-related failure, so this
-  # ignores ANY terminal CI failure, not only billing ones. CI is still polled
-  # and still reported. Review gate only: no merge gate is relaxed
-  # (/issue-pr-review --auto, /auto-pilot), so merge that PR by hand.
+  # CI status is informational only in this repo. It is private, and GitHub
+  # Actions results and minutes must not gate IDD work. The gate is local:
+  # `ruff check .`, offline `pytest -q -m 'not live'`, and the plugin's own
+  # validate/doctor (run_tests above, resolve.auto_test below).
+  # false: /issue-pr-review Step 5 is skipped (no CI poll, no wait, no CI
+  # fixable) and the CI leg counts as satisfied. That also covers the review
+  # run inside /auto-pilot, which spawns /issue-pr-review.
+  check_ci: false
+  # Kept false. It is moot while check_ci is false: it only matters once CI is
+  # polled, it still polls (waits on) CI, and it relaxes no merge gate.
   ignore_ci_billing_failures: false
+  # Unused by the review while check_ci is false. /auto-pilot Phase 5 still
+  # runs its own CI wait when checks are pending, and no config key turns
+  # that wait off. ci_timeout is set to the schema minimum (60) to bound it.
+  # Under autopilot.mode: conservative the PR is left open either way.
   ci_poll_interval: 30
-  ci_timeout: 600
+  ci_timeout: 60
   test_timeout: 300
   soft_pass: true
   require_acceptance_criteria_check: true
@@ -138,7 +146,8 @@ autopilot:
   # "aggressive":   auto-merge clean PRs AND merge partial PRs when
   #                 merge_partial=true is also set (see below). Risky —
   #                 only enable on disposable/experimental repos.
-  # conservative until #3 adds lint/test CI
+  # conservative: PRs are merged by hand. CI status is not a merge signal here
+  # (see review.check_ci), so auto-pilot never merges on its own.
   mode: conservative
 
   # Allow merging PRs that still have unresolved fixable review issues.
