@@ -1,0 +1,235 @@
+"""adapter.py: pin and install surface, result parsing, run/resume contract."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from onair import adapter
+from onair.adapter import AdapterError, JobStatus
+
+from fakes import OTHER_SHA, PINNED_SHA, FakeRunner, done, write_install
+
+
+def result_json(status="needs_agent", **overrides) -> str:
+    data = {
+        "version": 1,
+        "status": status,
+        "step": "script",
+        "job": "/data/jobs/2026-11-05-abc",
+        "message": "write the script",
+        "reply": None,
+        "next": "dropcast resume /data/jobs/2026-11-05-abc",
+        "steps": {"ingest": "done"},
+        "request": {},
+        "notes": [],
+    }
+    data.update(overrides)
+    return json.dumps(data, indent=2)
+
+
+# --- install surface ---
+
+
+def test_install_spec_is_the_pinned_git_ssh_url_with_extras():
+    spec = adapter.install_spec()
+    assert spec == f"dropcast[edgetts] @ git+ssh://git@github.com/luongnv89/dropcast@{adapter.DROPCAST_PIN}"
+    assert adapter.install_args() == ["--reinstall-package", "dropcast", spec]
+
+
+def test_smoke_argv_runs_the_sidecar_executable(tmp_path):
+    assert adapter.smoke_argv(tmp_path) == [str(tmp_path / "bin" / "dropcast"), "--help"]
+
+
+def test_installed_commit_reads_direct_url(tmp_path):
+    write_install(tmp_path, PINNED_SHA)
+    assert adapter.installed_commit(tmp_path) == PINNED_SHA
+    assert adapter.pin_matches(PINNED_SHA)
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {"url": "file:///src/dropcast", "dir_info": {}},  # a local install, not the pin
+        {"vcs_info": {"commit_id": adapter.DROPCAST_PIN}},  # short SHA: not what uv writes
+        {"vcs_info": {"commit_id": "Z" * 40}},
+        [],
+    ],
+)
+def test_installed_commit_rejects_non_vcs_records(tmp_path, record):
+    write_install(tmp_path, commit=None)
+    info = tmp_path / "lib" / "python3.12" / "site-packages" / "dropcast-0.2.0.dist-info"
+    info.mkdir(parents=True)
+    (info / "direct_url.json").write_text(json.dumps(record))
+    assert adapter.installed_commit(tmp_path) is None
+
+
+def test_installed_commit_tolerates_missing_and_broken_files(tmp_path):
+    assert adapter.installed_commit(tmp_path) is None
+    info = tmp_path / "lib" / "python3.12" / "site-packages" / "dropcast-0.2.0.dist-info"
+    info.mkdir(parents=True)
+    (info / "direct_url.json").write_text("{not json")
+    assert adapter.installed_commit(tmp_path) is None
+
+
+@pytest.mark.parametrize(
+    ("commit", "expected"),
+    [
+        (PINNED_SHA, True),
+        (OTHER_SHA, False),
+        (None, False),
+        ("", False),
+        (adapter.DROPCAST_PIN, False),
+    ],
+)
+def test_pin_matches_needs_a_full_sha_starting_with_the_pin(commit, expected):
+    assert adapter.pin_matches(commit) is expected
+
+
+# --- result parsing and statuses ---
+
+
+@pytest.mark.parametrize("status", [s.value for s in JobStatus])
+def test_parse_result_accepts_every_contract_status(status):
+    result = adapter.parse_result(result_json(status))
+    assert result.status is JobStatus(status)
+    assert result.job == "/data/jobs/2026-11-05-abc"
+    assert result.raw["version"] == 1
+
+
+def test_status_sets_partition_the_contract():
+    assert {s.value for s in JobStatus} == {
+        "needs_agent", "needs_approval", "rendering", "delivered", "stopped", "failed",
+    }
+    assert {s for s in JobStatus if s.terminal} == {
+        JobStatus.DELIVERED, JobStatus.STOPPED, JobStatus.FAILED,
+    }
+    needs_input = {s for s in JobStatus if s.needs_input}
+    assert needs_input == {JobStatus.NEEDS_AGENT, JobStatus.NEEDS_APPROVAL}
+    assert not JobStatus.RENDERING.terminal and not JobStatus.RENDERING.needs_input
+
+
+def test_parse_result_reads_a_delivered_reply():
+    reply = {"adapter": "headless", "text": "Your episode is ready", "attachments": ["/x/ep.mp3"]}
+    result = adapter.parse_result(result_json("delivered", step="reply", reply=reply, next=None))
+    assert result.status.terminal
+    assert result.reply["attachments"] == ["/x/ep.mp3"]
+    assert result.next is None
+
+
+def test_parse_result_skips_stray_lines_before_the_json():
+    result = adapter.parse_result("warming up\n" + result_json("rendering"))
+    assert result.status is JobStatus.RENDERING
+
+
+@pytest.mark.parametrize(
+    ("stdout", "message"),
+    [
+        ("", "no result"),
+        ("not json at all", "not JSON"),
+        ("[1, 2]", "not a JSON object"),
+        (json.dumps({"status": "delivered"}), "lacks"),
+        (result_json("exploded"), "unknown DropCast status"),
+        (result_json("delivered", reply="text"), "malformed reply"),
+    ],
+)
+def test_parse_result_rejects_output_outside_the_contract(stdout, message):
+    with pytest.raises(AdapterError, match=message):
+        adapter.parse_result(stdout)
+
+
+# --- run / resume ---
+
+
+def _safe(argv: list[str]) -> None:
+    joined = " ".join(argv)
+    assert "--adapter headless --headless" in joined
+    assert "--no-publish" in argv
+    assert "--approve-budget 0 --approve-budget-usd 0" in joined
+    assert "--engine edgetts" in joined
+    assert "--publish" not in argv
+
+
+def test_run_argv_is_headless_free_and_unpublished(tmp_path):
+    argv = adapter.build_run_argv(tmp_path, Path("/r"), link="https://example.com/a")
+    assert argv[:2] == [str(tmp_path / "bin" / "dropcast"), "run"]
+    assert argv[argv.index("--root") + 1] == "/r"
+    assert argv[-2:] == ["--", "https://example.com/a"]
+    _safe(argv)
+
+
+def test_run_argv_passes_text_as_one_flag(tmp_path):
+    argv = adapter.build_run_argv(tmp_path, Path("/r"), text="--looks like a flag")
+    assert argv[-1] == "--text=--looks like a flag"
+    _safe(argv)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{}, {"link": "a", "text": "b"}, {"link": ""}, {"text": "  "}, {"link": "-"}, {"text": "-"}],
+)
+def test_run_argv_refuses_bad_sources(tmp_path, kwargs):
+    with pytest.raises(AdapterError):
+        adapter.build_run_argv(tmp_path, Path("/r"), **kwargs)
+
+
+@pytest.mark.parametrize("answer", [None, "no", "free"])
+def test_resume_argv_is_headless_free_and_unpublished(tmp_path, answer):
+    argv = adapter.build_resume_argv(tmp_path, "/r/jobs/j1", Path("/r"), answer)
+    assert argv[1] == "resume"
+    assert argv[-2:] == ["--", "/r/jobs/j1"]
+    assert ("--answer" in argv) is (answer is not None)
+    _safe(argv)
+
+
+@pytest.mark.parametrize("answer", ["yes", "YES", "maybe", ""])
+def test_resume_never_approves_spending(tmp_path, answer):
+    with pytest.raises(AdapterError, match="not allowed"):
+        adapter.build_resume_argv(tmp_path, "/r/jobs/j1", Path("/r"), answer)
+
+
+def test_child_env_scrubs_paid_and_publish_knobs():
+    base = {name: "x" for name in adapter.SCRUBBED_ENV} | {"PATH": "/bin", "DROPCAST_PUBLISH": "1"}
+    env = adapter.child_env(base)
+    assert env == {"PATH": "/bin", "DROPCAST_PUBLISH": "0"}
+    assert {
+        "OPENROUTER_API_KEY", "ELEVENLABS_API_KEY", "DROPCAST_PUBLISH_CMD",
+        "DROPCAST_APPROVE_BUDGET", "DROPCAST_APPROVE_BUDGET_USD",
+    } <= adapter.SCRUBBED_ENV
+
+
+@pytest.mark.parametrize(("code", "status"), [(0, "delivered"), (1, "needs_agent"), (1, "stopped")])
+def test_run_parses_exit_0_and_1(tmp_path, code, status):
+    runner = FakeRunner().on(lambda a: a[1] == "run", done(code, result_json(status)))
+    result = adapter.run(tmp_path, Path("/r"), link="https://example.com/a", runner=runner,
+                         env={"PATH": "/bin", "OPENROUTER_API_KEY": "k"})
+    assert result.status is JobStatus(status)
+    call = runner.calls[0]
+    assert call["env"] == {"PATH": "/bin", "DROPCAST_PUBLISH": "0"}
+    assert call["stdin"] is subprocess.DEVNULL
+    assert call["check"] is False
+
+
+def test_resume_passes_through_the_runner(tmp_path):
+    runner = FakeRunner().on(lambda a: a[1] == "resume", done(1, result_json("needs_approval")))
+    result = adapter.resume(tmp_path, "/r/jobs/j1", Path("/r"), "free", runner=runner, env={})
+    assert result.status.needs_input
+    assert runner.argvs()[0][-4:] == ["--answer", "free", "--", "/r/jobs/j1"]
+
+
+def test_usage_error_raises_with_the_last_stderr_line(tmp_path):
+    runner = FakeRunner().on(lambda a: True, done(2, "", "Traceback…\nerror: unknown engine"))
+    with pytest.raises(AdapterError, match=r"exit 2\): error: unknown engine"):
+        adapter.run(tmp_path, Path("/r"), link="x", runner=runner, env={})
+
+
+def test_missing_executable_and_timeout_are_adapter_errors(tmp_path):
+    runner = FakeRunner().on(lambda a: True, FileNotFoundError("dropcast"))
+    with pytest.raises(AdapterError, match="hermes onair setup"):
+        adapter.run(tmp_path, Path("/r"), link="x", runner=runner, env={})
+    runner = FakeRunner().on(lambda a: True, subprocess.TimeoutExpired("dropcast", 1))
+    with pytest.raises(AdapterError, match="did not answer"):
+        adapter.resume(tmp_path, "j", Path("/r"), runner=runner, env={})

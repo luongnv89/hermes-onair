@@ -1,0 +1,30 @@
+# Tool configuration only: Hermes loads this plugin from plugin.yaml
+# (python_runtime: external), so there is no build or dependency metadata here.
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = [".idd"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "SIM"]
+ignore = [
+    "S603", # subprocess with argv lists built in code (no shell)
+    "S607", # `uv` is found on PATH on purpose
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["onair"]
+known-local-folder = ["fakes", "test_register"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S108"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["tests"]
+addopts = "-m 'not live' --import-mode=importlib -p no:cacheprovider"
+markers = [
+    "live: reaches a real network service; deselected by default, run by hand with `pytest -m live`",
+]
