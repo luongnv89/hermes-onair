@@ -1,18 +1,33 @@
 """Test harness: offline by default (AGENTS.md rule 5).
 
-- Non-loopback network use is blocked: ``connect``/``connect_ex``,
-  ``sendto``/``sendmsg`` to an address, and the DNS calls ``getaddrinfo``,
-  ``gethostbyname``, ``gethostbyname_ex`` and ``gethostbyaddr``.
-- No process can start: ``subprocess.Popen`` (so ``subprocess.run``),
-  ``os.system`` and ``os.posix_spawn``/``posix_spawnp`` raise.
-- Every blocked attempt is recorded and fails the test at teardown, even when
-  the code under test caught the error.
+Exactly what is blocked for every test not marked ``live``:
+
+- sockets: ``connect``, ``connect_ex``, and ``sendto``/``sendmsg`` with an
+  address, to anything but loopback (IPv4-mapped IPv6 included) or a
+  non-IP family (AF_UNIX). This holds for ``socket.socket`` and for raw
+  ``_socket.socket``/``socket.SocketType`` objects created during the test
+  (both names are swapped for a guarded subclass);
+- DNS: ``socket.getaddrinfo``, ``gethostbyname``, ``gethostbyname_ex`` and
+  ``gethostbyaddr`` for any name but ``localhost``/``*.localhost`` or a
+  loopback address;
+- processes: ``subprocess.Popen`` (so ``subprocess.run`` and friends),
+  ``os.system``, ``os.posix_spawn``/``posix_spawnp``, ``os.spawn*``,
+  ``os.fork``/``os.forkpty`` and ``os.exec*``.
+
+Every blocked attempt is recorded and fails the test at teardown, even when
+the code under test caught the error. Not covered: sockets created before the
+test started, C extensions that call the OS directly (``_posixsubprocess``,
+``ctypes``), and child processes' own network use; the code under test takes
+an injected runner instead of spawning.
+
 - ``OPENROUTER_API_KEY`` is removed from the environment.
 - Tests marked ``live`` are deselected by default (``-m 'not live'`` in
   pyproject.toml) and are the only ones exempt from these guards.
-- Tests marked ``real_uv`` may start the real ``uv`` (and nothing else), with
-  an environment that keeps it offline (see ``real_uv_env``); the network
-  guard still applies to them.
+- Tests marked ``real_uv`` may start exactly one program, the ``uv`` found on
+  PATH, through ``subprocess.Popen`` only, with no ``executable=`` override,
+  no shell, and ``env`` equal to the test's ``real_uv_env`` (offline uv, no
+  paid keys); every other start is blocked as above. The socket guards still
+  apply to them.
 
 The repo root is the plugin package; it is imported here as ``onair`` the way
 Hermes loads it (``spec_from_file_location`` with the root as its search path).
@@ -20,6 +35,7 @@ Hermes loads it (``spec_from_file_location`` with the root as its search path).
 
 from __future__ import annotations
 
+import _socket
 import importlib.util
 import ipaddress
 import os
@@ -67,6 +83,7 @@ class OfflineGuard:
     def __init__(self) -> None:
         self.attempts: list[str] = []
         self.allowed_programs: set[str] = set()
+        self.allowed_env: dict[str, str] | None = None
 
     def allowed(self, sock: socket.socket, address) -> bool:
         if sock.family not in (socket.AF_INET, socket.AF_INET6):
@@ -136,6 +153,17 @@ def offline_guard(request, monkeypatch):
     monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
     monkeypatch.setattr(socket.socket, "sendto", sendto)
     monkeypatch.setattr(socket.socket, "sendmsg", sendmsg)
+
+    # `_socket.socket` is an immutable C type, so swap the names it is reached by.
+    class GuardedRawSocket(_socket.socket):
+        pass
+
+    GuardedRawSocket.connect = connect
+    GuardedRawSocket.connect_ex = connect_ex
+    GuardedRawSocket.sendto = sendto
+    GuardedRawSocket.sendmsg = sendmsg
+    monkeypatch.setattr(_socket, "socket", GuardedRawSocket)
+    monkeypatch.setattr(socket, "SocketType", GuardedRawSocket)
     for name in ("getaddrinfo", "gethostbyname", "gethostbyname_ex", "gethostbyaddr"):
         monkeypatch.setattr(socket, name, dns(name, getattr(socket, name)))
 
@@ -146,16 +174,23 @@ def offline_guard(request, monkeypatch):
         if uv is None:
             pytest.skip("uv is not on PATH")
         guard.allowed_programs.add(uv)
+        guard.allowed_env = request.getfixturevalue("real_uv_env")
 
     class GuardedPopen(real_popen):
         def __init__(self, *args, **kwargs):
             program = _program(args, kwargs)
+            why = None
             if program not in guard.allowed_programs:
-                raise guard.block(
-                    f"process {program!r}", RuntimeError,
-                    f"tests must not start real processes; inject a fake runner "
-                    f"(attempted: {program!r})",
-                )
+                why = "tests must not start real processes; inject a fake runner"
+            elif len(args) > 1 or kwargs.get("executable") not in (None, program):
+                why = "a real_uv test may not override the executable"
+            elif kwargs.get("shell"):
+                why = "a real_uv test may not use a shell"
+            elif kwargs.get("env") != guard.allowed_env:
+                why = "a real_uv test must pass env=real_uv_env"
+            if why:
+                raise guard.block(f"process {program!r}", RuntimeError,
+                                  f"{why} (attempted: {program!r})")
             super().__init__(*args, **kwargs)
 
     def no_system(command):
@@ -163,16 +198,18 @@ def offline_guard(request, monkeypatch):
                           f"tests must not start real processes (os.system {command!r})")
 
     def no_spawn(name):
-        def spawn(path, *args, **kwargs):
-            raise guard.block(f"os.{name} {path!r}", RuntimeError,
-                              f"tests must not start real processes (os.{name} {path!r})")
+        def spawn(*args, **kwargs):
+            what = f"os.{name} {args[0]!r}" if args else f"os.{name}"
+            raise guard.block(what, RuntimeError, f"tests must not start real processes ({what})")
 
         return spawn
 
     monkeypatch.setattr(subprocess, "Popen", GuardedPopen)
     monkeypatch.setattr(os, "system", no_system)
-    for name in ("posix_spawn", "posix_spawnp"):
-        if hasattr(os, name):
+    starters = ("posix_spawn", "posix_spawnp", "fork", "forkpty")
+    starters += tuple(n for n in dir(os) if n.startswith(("spawn", "exec")))
+    for name in starters:
+        if callable(getattr(os, name, None)):
             monkeypatch.setattr(os, name, no_spawn(name))
 
     yield guard
@@ -184,7 +221,13 @@ def offline_guard(request, monkeypatch):
 @pytest.fixture
 def real_uv_env(tmp_path):
     """An environment that keeps a real ``uv venv`` offline and self-contained."""
-    env = {k: v for k, v in os.environ.items() if not k.startswith("UV_")}
+    from onair import adapter
+
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith("UV_") and k not in adapter.SCRUBBED_ENV
+    }
     env.update(
         UV_OFFLINE="1",
         UV_PYTHON_DOWNLOADS="never",

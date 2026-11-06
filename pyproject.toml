@@ -19,6 +19,8 @@ known-local-folder = ["fakes", "test_register"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S105", "S108"]
+# Calls the offline guard must block; they never reach the OS while it is active.
+"tests/test_guards.py" = ["S101", "S105", "S108", "S602", "S605", "S606"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
