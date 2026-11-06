@@ -347,13 +347,45 @@ def test_an_unwritable_claim_still_speaks_unstored(tmp_path, monkeypatch):
     assert got.status == "unstored" and got.persona is personas.POOL[personas.hash_index("forge")]
 
 
-@pytest.mark.parametrize("content", [b"", b"{", b"[]", b'{"persona": 3}',
-                                     b'{"persona": "nobody"}', b"\xff\xfe"])
-def test_a_bad_own_claim_is_replaced(tmp_path, content):
+@pytest.mark.parametrize(("content", "reason"), [
+    (b"", "not valid JSON"), (b"{", "not valid JSON"), (b"\xff\xfe", "not valid JSON"),
+    (b"[]", "no persona name in it"), (b'{"persona": 3}', "no persona name in it"),
+    (b'{"persona": "zed"}', "persona 'zed' is not in the pool"),
+])
+def test_a_bad_own_claim_is_replaced_with_a_warning(tmp_path, caplog, content, reason):
     root = make_root(tmp_path, ("forge",))
-    (data_of(root, "forge") / "persona.json").write_bytes(content)
+    path = data_of(root, "forge") / "persona.json"
+    path.write_bytes(content)
+    caplog.set_level("WARNING", logger="onair")
     got = claim(root, "forge")
     assert got.status == "claimed" and stored(root, "forge") == got.persona.id
+    assert f"profile forge: ignoring its claim file {path} ({reason})" in caplog.text
+
+
+def test_an_unreadable_own_claim_is_named_in_the_warning(tmp_path, caplog):
+    root = make_root(tmp_path, ("forge",))
+    path = data_of(root, "forge") / "persona.json"
+    os.mkfifo(path)
+    caplog.set_level("WARNING", logger="onair")
+    claim(root, "forge")  # the FIFO is replaced by a regular claim file
+    assert "(not a regular file)" in caplog.text and path.is_file()
+
+
+def test_a_missing_own_claim_is_not_a_warning(tmp_path, caplog):
+    root = make_root(tmp_path, ("forge",))
+    caplog.set_level("WARNING", logger="onair")
+    assert claim(root, "forge").status == "claimed"
+    assert caplog.text == ""
+
+
+def test_inspect_record_reasons(tmp_path):
+    assert personas.inspect_record(tmp_path / "none.json") == (None, None)
+    big = tmp_path / "big.json"
+    big.write_text(json.dumps({"persona": "bob", "pad": "x" * personas.CLAIM_MAX_BYTES}))
+    assert personas.inspect_record(big) == (None, f"larger than {personas.CLAIM_MAX_BYTES} bytes")
+    good = tmp_path / "good.json"
+    good.write_text('{"persona": "bob"}')
+    assert personas.inspect_record(good) == ({"persona": "bob"}, None)
 
 
 def test_sibling_claim_files_are_only_read(tmp_path):

@@ -266,32 +266,43 @@ def _stored(profile: str, path: Path, record: Mapping[str, Any]) -> Claim:
 
 
 def read_record(path: Path) -> dict[str, Any] | None:
-    """A claim file's record, or None when missing, unreadable, odd or not in the pool.
+    """A claim file's record, or None when missing, unreadable, odd or not in the pool."""
+    return inspect_record(path)[0]
 
-    Opened without following a symlink and without blocking (a FIFO is not a
-    file), and read only when it is a small regular file.
+
+def inspect_record(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    """``(record, None)``, ``(None, None)`` when there is no file, or ``(None, reason)``.
+
+    Opened without blocking (a FIFO is not a file), and read only when it is
+    a small regular file.
     """
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         fd = os.open(path, flags | getattr(os, "O_CLOEXEC", 0))
-    except OSError:
-        return None
+    except FileNotFoundError:
+        return None, None
+    except OSError as exc:
+        return None, f"cannot open it: {exc.strerror or type(exc).__name__}"
     try:
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_size > CLAIM_MAX_BYTES:
-            return None
+        if not stat.S_ISREG(info.st_mode):
+            return None, "not a regular file"
+        if info.st_size > CLAIM_MAX_BYTES:
+            return None, f"larger than {CLAIM_MAX_BYTES} bytes"
         data = os.read(fd, CLAIM_MAX_BYTES + 1)
-    except OSError:
-        return None
+    except OSError as exc:
+        return None, f"cannot read it: {exc.strerror or type(exc).__name__}"
     finally:
         os.close(fd)
     try:
         record = json.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
-        return None
+        return None, "not valid JSON"
     if not isinstance(record, dict) or not isinstance(record.get("persona"), str):
-        return None
-    return record if record["persona"] in BY_ID else None
+        return None, "no persona name in it"
+    if record["persona"] not in BY_ID:
+        return None, f"persona {record['persona']!r} is not in the pool"
+    return record, None
 
 
 def held_by_siblings(home: Path | None) -> dict[str, list[str]]:
@@ -432,9 +443,12 @@ def claim(data_dir: Path, profile: str, home: Path | None) -> Claim:
     if record is not None and _owned(record, profile):
         return _stored(profile, path, record)
     with root_lock(home) as lock:
-        record = read_record(path)  # another process of this profile may have won
+        record, rejected = inspect_record(path)  # another process may have won meanwhile
         if record is not None and _owned(record, profile):
             return _stored(profile, path, record)
+        if rejected:
+            log.warning("profile %s: ignoring its claim file %s (%s); claiming a persona again",
+                        profile, path, rejected)
         held = held_by_siblings(home)
         if record is not None and not held.get(record["persona"]):
             persona, how = BY_ID[record["persona"]], "adopted"  # renamed: keep the voice
