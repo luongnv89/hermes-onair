@@ -243,7 +243,7 @@ def mp3_to(env: Environment, mp3: Path, out: Path, fmt: str) -> None:
     """An MP3 -> *out* in *fmt*: copied when *fmt* is mp3 or ffmpeg is missing."""
     if fmt == "mp3" or not env.ffmpeg:
         if fmt != "mp3":
-            log.warning("onair: no ffmpeg to make %s; writing MP3 instead", fmt)
+            log.warning("no ffmpeg to make %s; writing MP3 instead", fmt)
         shutil.copyfile(mp3, out)
         return
     _ffmpeg(env, ["-i", str(mp3), *_codec(fmt)], out)
@@ -350,10 +350,10 @@ def speak(
         except (EngineError, OSError) as exc:
             reason = openrouter.scrub(str(exc), key)
             env.attempts.append({"engine": engine, "voice": voice, "error": reason})
-            log.warning("onair: %s could not speak (%s); trying the next engine", engine, reason)
+            log.warning("%s could not speak (%s); trying the next engine", engine, reason)
             continue
         env.attempts.append({"engine": engine, "voice": voice, "error": ""})
-        log.info("onair: spoke %d chars with %s (%s, %s)", len(text), engine, voice, language)
+        log.info("spoke %d chars with %s (%s, %s)", len(text), engine, voice, language)
         return engine
     detail = "; ".join(f"{a['engine']}: {a['error']}" for a in env.attempts)
     raise AllEnginesFailed(f"no free voice engine could speak this: {detail}")
