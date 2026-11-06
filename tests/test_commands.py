@@ -72,8 +72,12 @@ def test_voice_shows_fish_or_says_it_is_skipped(profiles):
     assert "  Fish:     Laura (e3cd384158934cc9a01029cd7d278634), every language" \
         in profiles.run("forge", "voice")
     profiles.run("forge", "voice set bram")
-    assert "  Fish:     none (Fish is skipped; English goes to HeyGen), every language" \
-        in profiles.run("forge", "voice")
+    reply = profiles.run("forge", "voice")
+    assert "  Fish:     none (skipped unless a setting names one), every language" in reply
+    assert "HeyGen)" not in reply  # never claims where English goes: that depends on the key
+    with_setting = profiles.run("forge", "voice", {"voices": {"fish": {"*": "abc123"}}})
+    assert "  Fish:     none (skipped unless a setting names one)" in with_setting
+    assert "  Fish en: abc123 (from settings)" in with_setting
 
 
 def test_voice_names_the_settings_that_override_the_persona(profiles):

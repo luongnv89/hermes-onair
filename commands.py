@@ -47,7 +47,7 @@ def _setting(get_config: Callable[..., Any] | None, key: str, default: Any) -> A
 
 def _fish_label(persona: personas.Persona) -> str:
     if persona.fish is None:
-        return "none (Fish is skipped; English goes to HeyGen)"
+        return "none (skipped unless a setting names one)"
     return f"{persona.fish} ({persona.fish_id})"
 
 

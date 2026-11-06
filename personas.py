@@ -14,9 +14,10 @@ voices speak every language, so they hold one voice each.
 - **Fish**: only the 7 Fish Official voices that DropCast records with their
   terms and the owner's approval (``src/dropcast/data/voices/manifest.json``,
   issue #116). No id is invented, so 3 personas (Bram, Sabrina, Weston)
-  have **no Fish voice**. Fallback: for them the router skips Fish, so
-  English goes to HeyGen in their own HeyGen voice, and the persona stays
-  distinct instead of sharing a Fish voice.
+  have **no Fish voice**. Fallback: for them the router skips Fish (unless
+  a setting or ``tts.voice`` names one), so the next engine in the chain
+  speaks in their own voice, and the persona stays distinct instead of
+  sharing a Fish voice.
 - **edge-tts**: a distinct voice per language from ``edge-tts
   --list-voices`` (47 en, 13 fr, 2 vi). Vietnamese has only 2 native voices
   (``vi-VN-NamMinhNeural``, ``vi-VN-HoaiMyNeural``). Fallback: the other 8

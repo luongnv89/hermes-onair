@@ -127,9 +127,9 @@ and survives restarts.
   OpenRouter's public model list; one per persona.
 - **Fish**: the 7 Fish Official voices DropCast records with their terms
   (personal, non-commercial use). There are no more, so bram, sabrina and
-  weston have none: Fish is skipped for them and English goes to HeyGen in
-  their own voice. A `voices` setting or `tts.voice: fish:<id>` brings Fish
-  back for such a profile.
+  weston have none: Fish is skipped for them, and the next engine in the
+  chain speaks in their own voice. A `voices` setting or `tts.voice:
+  fish:<id>` brings Fish back for such a profile.
 - **edge-tts** has only 2 native Vietnamese voices; the other personas speak
   Vietnamese with Microsoft multilingual voices. Languages other than en, fr
   and vi use the defaults.
