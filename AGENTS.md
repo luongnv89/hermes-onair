@@ -39,7 +39,6 @@ These are not negotiable. A change that breaks one is wrong, even if tests pass.
 ```sh
 ruff check .
 pytest -q          # offline; `pytest -m live` only by hand
-                   # (`pytest` exits 5 = no tests yet, until #3 lands)
 ```
 
 CI status is informational; local `ruff check .` and `pytest -q -m 'not live'` are the gate.

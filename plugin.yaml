@@ -1,0 +1,29 @@
+name: onair
+version: 0.1.0
+description: >-
+  On Air: free voices and two-host audio shows for Hermes agents. This
+  release adds `hermes onair setup`, which installs the pinned DropCast
+  sidecar into the plugin's data dir with uv.
+author: Luong NGUYEN
+license: MIT
+manifest_version: 2
+api_version: 1
+kind: standalone
+platforms: [linux, macos]
+tags: [tts, voice, podcast]
+# The host side is stdlib-only. DropCast runs in its own uv venv
+# (`hermes onair setup`), so Hermes installs nothing for this plugin.
+python_runtime: external
+# register() registers only the `hermes onair` CLI command, for which Hermes
+# has no provides_* key: no tools, no hooks.
+provides_tools: []
+provides_hooks: []
+config_schema:
+  uv_bin:
+    type: str
+    default: ""
+    description: Path or name of the uv executable; empty looks up uv on PATH.
+  sidecar_python:
+    type: str
+    default: ">=3.11"
+    description: Python request passed to `uv venv --python` for the sidecar venv.
