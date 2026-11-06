@@ -319,3 +319,65 @@ def test_the_real_transport_turns_http_client_errors_into_oserror(monkeypatch, o
         openrouter.urllib_http(
             "GET", openrouter.MODELS_URL, headers={}, body=None, timeout=1
         )
+
+
+# ------------------------------------------------- review r1, B1: duplicates
+
+PAID = {"prompt": "0.01", "completion": "0"}
+
+
+@pytest.mark.parametrize("order", [(PAID, FREE), (FREE, PAID), (FREE, FREE)],
+                         ids=["paid-then-free", "free-then-paid", "free-twice"])
+def test_an_id_listed_more_than_once_is_refused_in_any_order(tmp_path, order):
+    payload = {"data": [{"id": FISH, "pricing": dict(p)} for p in order]}
+    models = openrouter.parse_models(payload)
+    assert openrouter.gate(FISH, models) == f"{FISH} is listed more than once"
+    http = FakeHttp(models=payload, speech={FISH: audio(MP3_BYTES)})
+    with pytest.raises(openrouter.OpenRouterError, match="listed more than once"):
+        speak(tmp_path, http)
+    assert [c["method"] for c in http.calls] == ["GET"]  # no speech POST
+
+
+def test_a_duplicate_stays_refused_from_the_cache(tmp_path):
+    payload = {"data": [{"id": FISH, "pricing": dict(PAID)}, {"id": FISH, "pricing": dict(FREE)},
+                        {"id": HEYGEN, "pricing": dict(FREE)}]}
+    catalog(tmp_path, FakeHttp(models=payload)).models()  # fetched and cached
+    cached = catalog(tmp_path, FakeHttp(models=OSError("must not fetch")))
+    with pytest.raises(openrouter.OpenRouterError, match="listed more than once"):
+        cached.check(FISH)
+    cached.check(HEYGEN)  # the other model is unaffected
+
+
+def test_a_cache_marking_a_duplicate_is_refused(tmp_path):
+    write_cache(tmp_path, NOW - 60, models={FISH: {openrouter.DUPLICATE: True, "pricing": FREE}})
+    with pytest.raises(openrouter.OpenRouterError, match="listed more than once"):
+        catalog(tmp_path, FakeHttp(models=OSError("must not fetch"))).check(FISH)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"data": [{"id": "@", "pricing": {"prompt": "0.01", "prompt": "0"}}]}',
+        '{"data": [{"id": "@", "pricing": {"prompt": "0.01"}, "pricing": {"prompt": "0"}}]}',
+        '{"data": [], "data": [{"id": "@", "pricing": {"prompt": "0"}}]}',
+    ],
+    ids=["price-key", "pricing-key", "data-key"],
+)
+def test_a_list_repeating_a_json_key_is_refused(tmp_path, text):
+    body = text.replace("@", FISH).encode()
+    answer = openrouter.HttpResponse(200, {"Content-Type": "application/json"}, body)
+    with pytest.raises(openrouter.OpenRouterError, match="repeats a key"):
+        catalog(tmp_path, FakeHttp(models=answer)).check(FISH)
+    assert not (tmp_path / openrouter.CACHE_NAME).exists()
+
+
+def test_a_cache_repeating_a_json_key_is_not_trusted(tmp_path):
+    paid_then_free = (
+        '{"fetched_at": NOW, "models": {"@": {"pricing": {"prompt": "0.01"}}, '
+        '"@": {"pricing": {"prompt": "0"}}}}'
+    )
+    (tmp_path / openrouter.CACHE_NAME).write_text(
+        paid_then_free.replace("@", FISH).replace("NOW", repr(NOW - 60))
+    )
+    with pytest.raises(openrouter.OpenRouterError, match="unreachable"):
+        catalog(tmp_path, FakeHttp(models=OSError("down"))).check(FISH)

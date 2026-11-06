@@ -3,9 +3,10 @@
 Price gate. Before any model is called, the public speech model list
 (``GET /models?output_modalities=speech``, sent WITHOUT a key) is read, from a
 cache in the plugin data dir when that copy is at most 24 h old. A model may
-be called only when it is listed, no listed price is non-zero, and either its
-id ends in ``:free`` or every listed price is zero. A price that is not a
-plain number counts as non-zero. No list, no fresh cache, a broken answer:
+be called only when it is listed exactly once, no listed price is non-zero,
+and either its id ends in ``:free`` or every listed price is zero. A price
+that is not a plain number counts as non-zero. A list (or cache) that repeats
+a JSON key is not trusted. No list, no fresh cache, a broken answer:
 OpenRouter is skipped.
 
 Key (rule 2). ``OPENROUTER_API_KEY`` is read from the environment at call
@@ -148,11 +149,18 @@ def _price(value: Any) -> Decimal | None:
     return price if price.is_finite() else None
 
 
+#: Set on an id the list names more than once: which copy is right is unknown,
+#: so the id is refused whatever its prices and whatever their order.
+DUPLICATE = "listed_more_than_once"
+
+
 def gate(model: str, catalog: Mapping[str, Any]) -> str | None:
     """Why *model* must not be called, or None when rule 1 allows the call."""
     entry = catalog.get(model)
     if not isinstance(entry, Mapping):
         return f"{model} is not in the public model list"
+    if entry.get(DUPLICATE) is not None:
+        return f"{model} is listed more than once"
     pricing = entry.get("pricing", {})
     if pricing is None:
         pricing = {}
@@ -171,15 +179,41 @@ def gate(model: str, catalog: Mapping[str, Any]) -> str | None:
 
 
 def parse_models(payload: Any) -> dict[str, dict[str, Any]]:
-    """``{id: {"pricing": …}}`` from the model list answer; raises on a broken answer."""
+    """``{id: {"pricing": …}}`` from the model list answer; raises on a broken answer.
+
+    An id that appears more than once becomes ``{DUPLICATE: True}`` (no
+    pricing kept), so :func:`gate` refuses it in any order, from the cache too.
+    """
     data = payload.get("data") if isinstance(payload, Mapping) else None
     if not isinstance(data, list):
         raise OpenRouterError("the model list has no 'data' array")
     models: dict[str, dict[str, Any]] = {}
     for entry in data:
         if isinstance(entry, Mapping) and isinstance(entry.get("id"), str):
-            models[entry["id"]] = {"pricing": entry.get("pricing")}
+            model = entry["id"]
+            if model in models:
+                models[model] = {DUPLICATE: True}
+            else:
+                models[model] = {"pricing": entry.get("pricing")}
     return models
+
+
+def _no_repeated_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """``json`` object hook: a key given twice in one object makes the document invalid.
+
+    Plain ``json.loads`` keeps the last value, so ``{"prompt": "0.01",
+    "prompt": "0"}`` would read as free.
+    """
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"repeated key {key!r}")
+        result[key] = value
+    return result
+
+
+def _loads(text: str) -> Any:
+    return json.loads(text, object_pairs_hook=_no_repeated_keys)
 
 
 @dataclass
@@ -201,9 +235,9 @@ class Catalog:
         try:
             if path.is_symlink() or not path.is_file():
                 return None
-            record = json.loads(path.read_text(encoding="utf-8"))
+            record = _loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            return None
+            return None  # unreadable, or a repeated key: not a copy to trust
         if not isinstance(record, Mapping):
             return None
         fetched = record.get("fetched_at")
@@ -232,9 +266,9 @@ class Catalog:
         if len(response.body) > MAX_LIST_BYTES:
             raise OpenRouterError("model list is too large")
         try:
-            payload = json.loads(response.body.decode("utf-8"))
+            payload = _loads(response.body.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
-            raise OpenRouterError("model list is not JSON") from None
+            raise OpenRouterError("model list is not JSON, or repeats a key") from None
         return parse_models(payload)
 
     def _store(self, models: Mapping[str, Any]) -> None:
