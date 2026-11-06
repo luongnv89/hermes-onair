@@ -153,10 +153,23 @@ def test_fish_mp3_is_converted_only_when_another_format_is_asked(tmp_path, data_
     assert "libopus" in run.argvs()[0]
 
 
-def test_without_ffmpeg_fish_writes_mp3_for_any_format(tmp_path, data_dir, key):
+def test_without_ffmpeg_mp3_still_works(tmp_path, data_dir, key):
     http = FakeHttp(speech={FISH: audio(MP3_BYTES)})
-    engine, out = speak(tmp_path, environment(data_dir, http, ffmpeg=None), fmt="wav")
+    engine, out = speak(tmp_path, environment(data_dir, http, ffmpeg=None), fmt="mp3")
     assert engine == "fish" and out.read_bytes() == MP3_BYTES
+
+
+@pytest.mark.parametrize("fmt", ["wav", "ogg", "opus", "flac"])
+def test_without_ffmpeg_another_format_fails_every_engine_unasked(tmp_path, data_dir, key, fmt):
+    # Review r1, N6: MP3 bytes are never written under another format's name.
+    http = FakeHttp(speech={FISH: audio(MP3_BYTES), HEYGEN: audio(PCM_BYTES, "audio/pcm")})
+    run = runner()
+    env = environment(data_dir, http, run, ffmpeg=None)
+    with pytest.raises(router.AllEnginesFailed, match=f"needed to make {fmt}"):
+        speak(tmp_path, env, fmt=fmt)
+    assert http.calls == [] and run.calls == []  # no request spent, edge not started
+    assert [a["engine"] for a in env.attempts] == ["fish", "heygen", "edge"]
+    assert list((tmp_path / "out").iterdir()) == []
 
 
 # ---------------------------------------------------------- fall-throughs

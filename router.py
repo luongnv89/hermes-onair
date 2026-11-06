@@ -10,7 +10,9 @@ Fish and HeyGen are OpenRouter's free speech models. Each is called only
 after the price gate in :mod:`openrouter` allows it (AGENTS.md rule 1). An
 engine is skipped and the next one tried on a missing key, a refused or
 failed price check, HTTP 401/402/408/429/5xx (any non-200), a network
-error or timeout, or an empty or invalid audio body. HeyGen answers raw PCM
+error or timeout, an empty or invalid audio body, or a requested format
+other than MP3 with no ffmpeg to make it (MP3 bytes are never written
+under another format's name). HeyGen answers raw PCM
 (44.1 kHz, 16-bit, mono), which ffmpeg converts; without ffmpeg HeyGen is
 skipped. edge-tts runs in the sidecar through :mod:`adapter` (rule 4); its
 audio is for private use only (rule 3).
@@ -250,13 +252,18 @@ def pcm_to(env: Environment, pcm: Path, out: Path, fmt: str, rate: int = HEYGEN_
     _ffmpeg(env, [*args, *_codec(fmt)], out)
 
 
+def _can_make(env: Environment, fmt: str) -> None:
+    """Raise EngineError when *fmt* needs ffmpeg and there is none (never mislabel MP3)."""
+    if fmt != "mp3" and not env.ffmpeg:
+        raise EngineError(f"ffmpeg not found (needed to make {fmt})")
+
+
 def mp3_to(env: Environment, mp3: Path, out: Path, fmt: str) -> None:
-    """An MP3 -> *out* in *fmt*: copied when *fmt* is mp3 or ffmpeg is missing."""
-    if fmt == "mp3" or not env.ffmpeg:
-        if fmt != "mp3":
-            log.warning("no ffmpeg to make %s; writing MP3 instead", fmt)
+    """An MP3 -> *out* in *fmt*: copied for mp3, converted by ffmpeg otherwise."""
+    if fmt == "mp3":
         shutil.copyfile(mp3, out)
         return
+    _can_make(env, fmt)
     _ffmpeg(env, ["-i", str(mp3), *_codec(fmt)], out)
 
 
@@ -270,6 +277,7 @@ def _pcm_rate(content_type: str) -> int:
 
 
 def render_fish(env: Environment, text: str, voice: str, work: Path, fmt: str) -> Path:
+    _can_make(env, fmt)  # checked first: never spend a request we cannot convert
     response = _call(env, FISH, text, voice, "mp3")
     if not _is_mp3(response.body):
         raise EngineError("the answer is not MP3 audio")
@@ -297,6 +305,7 @@ def render_heygen(env: Environment, text: str, voice: str, work: Path, fmt: str)
 def render_edge(
     env: Environment, text: str, voice: str, language: str, work: Path, fmt: str
 ) -> Path:
+    _can_make(env, fmt)
     venv = sidecar.venv_dir(env.data_dir)
     if sidecar.ownership(venv) not in (sidecar.OWNED, sidecar.ADOPTABLE):
         raise EngineError("the sidecar is not set up; run `hermes onair setup`")
