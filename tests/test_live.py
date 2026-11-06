@@ -7,17 +7,24 @@ Run by hand, with the key in the environment only (never in a file):
 Each test goes through the price gate first, so a model that is no longer free
 is skipped (the test fails, nothing paid is called). Audio lands in pytest's
 tmp dir and is for private listening only.
+
+The persona checks (issue #5) speak one short sentence with every Fish and
+HeyGen voice of the persona pool (7 + 10 free requests) and check the pool's
+HeyGen voices against the public model list (no key needed for that one):
+
+    OPENROUTER_API_KEY=... pytest -m live tests/test_live.py -v -s -k persona
 """
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from onair import openrouter, router
+from onair import openrouter, personas, router
 
 pytestmark = pytest.mark.live
 
@@ -84,4 +91,49 @@ def test_live_fish(tmp_path, key):
 def test_live_heygen(tmp_path, key):
     env = router.Environment(data_dir=tmp_path / "data", ffmpeg=ffmpeg_or_skip())
     made = router.render_heygen(env, SENTENCE, router.voice_for("heygen", "en"), tmp_path, "mp3")
+    check_audio(made)
+
+
+# ------------------------------------------------- issue #5: persona voices
+
+SHORT = "Hello from On Air."
+
+
+def rendered_or_skip(render):
+    try:
+        return render()
+    except router.EngineError as exc:
+        if "HTTP 429" in str(exc):
+            pytest.skip(f"rate limited: {exc}")
+        raise
+
+
+def test_live_persona_heygen_voices_are_in_the_public_list():
+    response = openrouter.urllib_http(
+        "GET", openrouter.MODELS_URL, headers={"Accept": "application/json"}, body=None,
+        timeout=openrouter.LIST_TIMEOUT_S,
+    )
+    assert response.status == 200
+    entries = [m for m in json.loads(response.body)["data"] if m.get("id") == router.HEYGEN_MODEL]
+    assert len(entries) == 1
+    listed = set(entries[0].get("supported_voices") or [])
+    print(f"\n  listed HeyGen voices: {sorted(listed)}")
+    assert {p.heygen for p in personas.POOL} <= listed
+
+
+@pytest.mark.parametrize("persona", [p for p in personas.POOL if p.fish], ids=lambda p: p.id)
+def test_live_persona_fish_voice(tmp_path, key, persona):
+    env = router.Environment(data_dir=tmp_path / "data", ffmpeg=router.find_ffmpeg())
+    voice = router.voice_for("fish", "en", None, persona)
+    assert voice == persona.fish_id
+    made = rendered_or_skip(lambda: router.render_fish(env, SHORT, voice, tmp_path, "mp3"))
+    check_audio(made)
+
+
+@pytest.mark.parametrize("persona", personas.POOL, ids=lambda p: p.id)
+def test_live_persona_heygen_voice(tmp_path, key, persona):
+    env = router.Environment(data_dir=tmp_path / "data", ffmpeg=ffmpeg_or_skip())
+    voice = router.voice_for("heygen", "en", None, persona)
+    assert voice == persona.heygen
+    made = rendered_or_skip(lambda: router.render_heygen(env, SHORT, voice, tmp_path, "mp3"))
     check_audio(made)

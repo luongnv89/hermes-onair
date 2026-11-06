@@ -1,8 +1,9 @@
 # hermes-onair
 On Air: free voices and two-host audio shows for Hermes Agent (Hermes plugin)
 
-> Status: early (v0.1.0). This release ships `hermes onair setup` and the free
-> voice router (`tts.provider: onair`); personas and `/onair` come next.
+> Status: early (v0.1.0). This release ships `hermes onair setup`, the free
+> voice router (`tts.provider: onair`) and a distinct voice per profile
+> (`/onair voice`); shows (`/onair` episodes) come next.
 
 ## Install
 
@@ -88,6 +89,65 @@ exactly one engine, the first in its language's chain that works:
   `opus` and `flac` need ffmpeg, and fail without it: MP3 is never written
   under another format's name). `tts.voice: <engine>:<voice>` (for example
   `edge:en-GB-RyanNeural`) sets one engine's voice.
+- **Voices**, first match wins: `tts.voice` for its engine, then the `voices`
+  setting, then the profile's persona (below), then the built-in defaults.
+
+## A voice per profile: `/onair voice`
+
+Each profile speaks as its own **persona**: a named character with one voice
+per engine and, for edge-tts, per language. A profile claims one the first
+time it speaks (or runs `/onair voice`): the probe walks the pool from
+`sha256(profile) % 10`, skips personas other profiles of the same Hermes root
+hold, and takes a free persona with a Fish voice before one without, so up to
+10 profiles never share a voice and, with 7 Fish voices, the first 7 all get
+one. The claim is stored in that profile's `plugin-data/onair/persona.json`
+and survives restarts.
+
+```text
+/onair voice                       this profile's persona and voices
+/onair voice list                  the pool, and which profile holds each persona
+/onair voice set <name> [--force]  change it; --force shares a persona another
+                                   profile holds (only this profile's claim changes)
+```
+
+| Persona | Fish | HeyGen | edge en | edge fr | edge vi |
+|---------|------|--------|---------|---------|---------|
+| bob (man) | Ethan | lucian | en-US-AndrewNeural | fr-FR-HenriNeural | vi-VN-NamMinhNeural |
+| alice (woman) | Hannah | tabitha | en-US-AvaNeural | fr-FR-DeniseNeural | vi-VN-HoaiMyNeural |
+| maya (woman) | Laura | meredith | en-GB-SoniaNeural | fr-CH-ArianeNeural | pt-BR-ThalitaMultilingualNeural |
+| sam (man) | Adrian | gareth | en-US-GuyNeural | fr-BE-GerardNeural | en-US-BrianMultilingualNeural |
+| lena (woman) | Sarah | noelle | en-US-EmmaNeural | fr-CA-SylvieNeural | de-DE-SeraphinaMultilingualNeural |
+| theo (man) | Jordan | vincent | en-GB-RyanNeural | fr-CA-ThierryNeural | en-AU-WilliamMultilingualNeural |
+| nadine (woman) | Selene | nadine | en-US-AriaNeural | fr-FR-VivienneMultilingualNeural | fr-FR-VivienneMultilingualNeural |
+| bram (man) | — | bram | en-US-ChristopherNeural | fr-FR-RemyMultilingualNeural | fr-FR-RemyMultilingualNeural |
+| sabrina (woman) | — | sabrina | en-US-JennyNeural | fr-FR-EloiseNeural | en-US-AvaMultilingualNeural |
+| weston (man) | — | weston | en-US-EricNeural | fr-CA-AntoineNeural | de-DE-FlorianMultilingualNeural |
+
+- **HeyGen**: the 10 voices `heygen/heygen-voice-1-turbo:free` lists in
+  OpenRouter's public model list; one per persona.
+- **Fish**: the 7 Fish Official voices DropCast records with their terms
+  (personal, non-commercial use). There are no more, so bram, sabrina and
+  weston have none: Fish is skipped for them, and the next engine in the
+  chain speaks in their own voice. A `voices` setting or `tts.voice:
+  fish:<id>` brings Fish back for such a profile.
+- **edge-tts** has only 2 native Vietnamese voices; the other personas speak
+  Vietnamese with Microsoft multilingual voices. Languages other than en, fr
+  and vi use the defaults.
+- Every voice is a stock voice of a free engine; nothing is cloned.
+- **Sharing.** Claims are found by reading the other profiles' claim files
+  (`<root>/plugin-data/onair/persona.json` and
+  `<root>/profiles/*/plugin-data/onair/persona.json`); no other profile's file
+  is ever written. Two profiles claiming at once are serialized by an `flock`
+  on the root directory (no lock file).
+- **The profile** is resolved on every call from the active Hermes home (the
+  same home as the plugin data): `<root>/profiles/<name>` is `<name>`;
+  otherwise `ctx.profile_name`, and, when that says `custom`, the home
+  directory's name.
+- A claim file names its profile. A profile cloned with
+  `hermes profile create --clone-all` (which copies `plugin-data`) claims its
+  own persona the first time it speaks; a renamed profile keeps its persona
+  while no other profile holds it.
+- An 11th profile shares the least-used persona.
 
 Settings (`plugins.entries.onair.settings` in `config.yaml`):
 
@@ -114,6 +174,8 @@ the price gate). It reads the key from the environment only:
 
 ```sh
 OPENROUTER_API_KEY=... pytest -m live tests/test_live.py -v -s
+# every Fish and HeyGen voice of the persona pool (7 + 10 free requests)
+OPENROUTER_API_KEY=... pytest -m live tests/test_live.py -v -s -k persona
 ```
 
 - Tests marked `real_uv` may start only the `uv` on `PATH`, through
