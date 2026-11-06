@@ -429,3 +429,103 @@ def test_installed_commit_needs_the_dropcast_repo_url(tmp_path):
     data["url"] = "ssh://git@github.com/someone-else/dropcast"
     record.write_text(json.dumps(data))
     assert adapter.installed_commit(tmp_path) is None
+
+
+# --- single-text edge-tts render ---
+
+
+def edge_answer(job: Path, rendered=True, **extra):
+    def respond(argv):
+        if not rendered:
+            return done(1, json.dumps({"rendered": False, "reason": "edge-tts: no network"},
+                                      indent=2))
+        episode = extra.pop("episode", None)
+        if episode is None:
+            episode = job / "out" / "episode.mp3"
+            episode.parent.mkdir(parents=True, exist_ok=True)
+            episode.write_bytes(b"ID3audio")
+        return done(0, "INFO stray line\n" + json.dumps({"rendered": True, "episode": str(episode)},
+                                                        indent=2))
+    return respond
+
+
+def test_edge_render_drives_the_module_cli(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fake-key")
+    monkeypatch.setenv("DROPCAST_THEME", "/my/theme.flac")
+    venv, job = tmp_path / "venv", tmp_path / "job"
+    job.mkdir()
+    runner = FakeRunner().on(lambda argv: True, edge_answer(job))
+    episode = adapter.edge_render(venv, "Bonjour à tous.", "fr-FR-DeniseNeural", "fr", job,
+                                  runner=runner)
+    assert episode == job / "out" / "episode.mp3"
+    (call,) = runner.calls
+    assert call["argv"] == [
+        str(venv / "bin" / "python"), "-I", "-m", "dropcast.edgetts", "render",
+        str(job / "script.json"), str(job / "voices.json"), "--out", str(job / "out"),
+        "--voice", "host=fr-FR-DeniseNeural", "--timeout", "150",
+    ]
+    assert "OPENROUTER_API_KEY" not in call["env"]
+    assert call["env"]["DROPCAST_THEME"] == "off" and call["env"]["DROPCAST_PUBLISH"] == "0"
+    assert call["stdin"] is subprocess.DEVNULL and call["timeout"] == adapter.EDGE_TIMEOUT_S
+    script = json.loads((job / "script.json").read_text())
+    assert script["language"] == "fr" and script["segments"][0]["text"] == "Bonjour à tous."
+    assert json.loads((job / "voices.json").read_text()) == {"roles": {}}
+
+
+def test_edge_script_matches_the_script_contract_shape():
+    script = adapter.edge_script("one two three", "en-US")
+    assert set(script) == {"title", "format", "language", "target_min", "est_min",
+                           "speakers", "segments"}
+    assert script["target_min"] > 0 and script["language"] == "en-US"
+    assert adapter.edge_script("x", "not a tag")["language"] == "en"
+
+
+def test_edge_render_reports_a_failed_render(tmp_path):
+    job = tmp_path / "job"
+    job.mkdir()
+    runner = FakeRunner().on(lambda argv: True, edge_answer(job, rendered=False))
+    with pytest.raises(AdapterError, match="exit 1.*no network"):
+        adapter.edge_render(tmp_path, "Hi.", "en-US-AvaNeural", "en", job, runner=runner)
+
+
+@pytest.mark.parametrize("answer", [done(0, "not json"), done(2, "", "usage: error"),
+                                    done(0, '{"rendered": true}')])
+def test_edge_render_refuses_answers_outside_the_contract(tmp_path, answer):
+    job = tmp_path / "job"
+    job.mkdir()
+    runner = FakeRunner().on(lambda argv: True, answer)
+    with pytest.raises(AdapterError):
+        adapter.edge_render(tmp_path, "Hi.", "en-US-AvaNeural", "en", job, runner=runner)
+
+
+def test_edge_render_refuses_an_episode_outside_the_job(tmp_path):
+    job = tmp_path / "job"
+    job.mkdir()
+    elsewhere = tmp_path / "elsewhere.mp3"
+    elsewhere.write_bytes(b"ID3")
+    runner = FakeRunner().on(lambda argv: True, edge_answer(job, episode=elsewhere))
+    with pytest.raises(AdapterError, match="outside the job"):
+        adapter.edge_render(tmp_path, "Hi.", "en-US-AvaNeural", "en", job, runner=runner)
+
+
+@pytest.mark.parametrize("voice", ["", "--answer=yes", "en US", "x"])
+def test_edge_render_refuses_odd_voice_names(tmp_path, voice):
+    with pytest.raises(AdapterError, match="not an edge-tts voice"):
+        adapter.edge_render(tmp_path, "Hi.", voice, "en", tmp_path, runner=FakeRunner())
+
+
+@pytest.mark.parametrize(
+    ("error", "match"),
+    [(FileNotFoundError(), "hermes onair setup"),
+     (subprocess.TimeoutExpired("x", 1), "did not answer"),
+     (PermissionError(13, "Permission denied"), "could not start")],
+)
+def test_edge_render_start_failures(tmp_path, error, match):
+    runner = FakeRunner().on(lambda argv: True, error)
+    with pytest.raises(AdapterError, match=match):
+        adapter.edge_render(tmp_path, "Hi.", "en-US-AvaNeural", "en", tmp_path, runner=runner)
+
+
+def test_edge_render_refuses_empty_text(tmp_path):
+    with pytest.raises(AdapterError, match="empty"):
+        adapter.edge_render(tmp_path, " ", "en-US-AvaNeural", "en", tmp_path, runner=FakeRunner())

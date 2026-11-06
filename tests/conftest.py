@@ -20,7 +20,10 @@ test started, C extensions that call the OS directly (``_posixsubprocess``,
 ``ctypes``), and child processes' own network use; the code under test takes
 an injected runner instead of spawning.
 
-- ``OPENROUTER_API_KEY`` is removed from the environment.
+- ``OPENROUTER_API_KEY`` is removed from the environment (kept only for
+  ``live`` tests, which read the real key from the environment).
+- ``agent.tts_provider`` (Hermes) gets a stand-in when Hermes is not
+  importable, so ``router.OnAirTTS`` can be built.
 - Tests marked ``live`` are deselected by default (``-m 'not live'`` in
   pyproject.toml) and are the only ones exempt from these guards.
 - Tests marked ``real_uv`` may start exactly one program, the ``uv`` found on
@@ -61,6 +64,66 @@ def _load_plugin_package() -> None:
     spec.loader.exec_module(module)
 
 
+def _hermes_tts_base() -> None:
+    """Hermes's ``agent.tts_provider`` when importable, else a stand-in with its shape.
+
+    ``router.OnAirTTS`` subclasses ``agent.tts_provider.TTSProvider``. Hermes
+    is not installed where the tests run, so this mirrors the parts the
+    plugin relies on (``hermes-agent/agent/tts_provider.py``): an ABC with an
+    abstract ``name`` and ``synthesize``, catalog defaults, ``is_available``.
+    """
+    try:
+        import agent.tts_provider  # noqa: F401
+        return
+    except ImportError:
+        pass
+    import abc
+    import types
+
+    class TTSProvider(abc.ABC):
+        streams_pcm = False
+        stream_sample_rate = None
+
+        @property
+        @abc.abstractmethod
+        def name(self) -> str: ...
+
+        @property
+        def display_name(self) -> str:
+            return self.name.title()
+
+        def is_available(self) -> bool:
+            return True
+
+        def list_models(self):
+            return []
+
+        def default_model(self):
+            models = self.list_models()
+            return models[0].get("id") if models else None
+
+        def list_voices(self):
+            return []
+
+        def default_voice(self):
+            voices = self.list_voices()
+            return voices[0].get("id") if voices else None
+
+        @abc.abstractmethod
+        def synthesize(self, text, output_path, *, voice=None, model=None, speed=None,
+                       format="mp3", **extra): ...
+
+    package = types.ModuleType("agent")
+    package.__path__ = []
+    module = types.ModuleType("agent.tts_provider")
+    module.TTSProvider = TTSProvider
+    module.STAND_IN = True
+    package.tts_provider = module
+    sys.modules["agent"] = package
+    sys.modules["agent.tts_provider"] = module
+
+
+_hermes_tts_base()
 _load_plugin_package()
 
 
@@ -243,5 +306,7 @@ def real_uv_env(tmp_path):
 
 
 @pytest.fixture(autouse=True)
-def no_api_key(monkeypatch):
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+def no_api_key(request, monkeypatch):
+    # A live test reads the real key from the environment; nothing else sees it.
+    if not request.node.get_closest_marker("live"):
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)

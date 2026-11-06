@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 import onair
-from onair import cli, sidecar
+from onair import cli, router, sidecar
 
 
 class StrictContext:
@@ -24,6 +24,7 @@ class StrictContext:
         self.cli_commands: list[dict] = []
         self.tools: list[str] = []
         self.hooks: list[str] = []
+        self.tts_providers: list = []
         self._config = config or {}
 
     def register_cli_command(self, name, help, setup_fn, handler_fn=None, description=""):
@@ -31,6 +32,9 @@ class StrictContext:
             {"name": name, "help": help, "setup_fn": setup_fn, "handler_fn": handler_fn,
              "description": description}
         )
+
+    def register_tts_provider(self, provider):
+        self.tts_providers.append(provider)
 
     def register_tool(self, name, *args, **kwargs):
         self.tools.append(name)
@@ -64,28 +68,43 @@ def calls(monkeypatch, tmp_path):
     return seen
 
 
-def test_register_adds_only_the_onair_cli_command():
+def test_register_adds_the_cli_command_and_the_tts_provider():
     ctx = StrictContext()
     onair.register(ctx)
     assert [c["name"] for c in ctx.cli_commands] == ["onair"]
     assert ctx.tools == [] and ctx.hooks == []
     assert callable(ctx.cli_commands[0]["handler_fn"])
+    (provider,) = ctx.tts_providers
+    assert isinstance(provider, router.OnAirTTS) and provider.name == "onair"
 
 
 def test_register_touches_nothing_else():
     class Bare:
         def __init__(self):
             self.n = 0
+            self.providers = []
 
         def register_cli_command(self, **kwargs):
             self.n += 1
 
+        def register_tts_provider(self, provider):
+            self.providers.append(provider)
+
         def get_config(self, key, default=None):
-            raise AssertionError("settings are read when the command runs, not at register()")
+            raise AssertionError("settings are read when they are used, not at register()")
 
     ctx = Bare()
     onair.register(ctx)  # any other attribute access would raise AttributeError
-    assert ctx.n == 1
+    assert ctx.n == 1 and len(ctx.providers) == 1
+
+
+def test_the_provider_reads_settings_through_the_context(tmp_path, monkeypatch):
+    ctx = StrictContext({"language": "fr", "ffmpeg_bin": "", "voices": {}})
+    monkeypatch.setattr(cli, "resolve_data_dir", lambda: tmp_path)
+    onair.register(ctx)
+    (provider,) = ctx.tts_providers
+    assert provider._setting("language", "auto") == "fr"
+    assert provider._data_dir() == tmp_path
 
 
 def test_setup_uses_defaults_when_nothing_is_configured(calls, tmp_path):

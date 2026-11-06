@@ -7,7 +7,7 @@ from pathlib import Path
 import yaml
 
 import onair
-from onair import sidecar
+from onair import router, sidecar
 
 from test_register import StrictContext
 
@@ -42,10 +42,13 @@ def test_config_schema_shape():
 
 def test_config_schema_matches_the_code():
     schema = MANIFEST["config_schema"]
-    assert set(schema) == {"uv_bin", "sidecar_python"}
+    assert set(schema) == {"uv_bin", "sidecar_python", "ffmpeg_bin", "language", "voices"}
     assert schema["uv_bin"]["default"] == sidecar.DEFAULT_UV_BIN
     assert schema["sidecar_python"]["default"] == sidecar.DEFAULT_SIDECAR_PYTHON
-    source = (ROOT / "cli.py").read_text(encoding="utf-8")
+    assert schema["ffmpeg_bin"]["default"] == router.DEFAULT_FFMPEG_BIN
+    assert schema["language"]["default"] == router.DEFAULT_LANGUAGE
+    assert schema["voices"] == {**schema["voices"], "type": "dict", "default": {}}
+    source = "".join((ROOT / name).read_text(encoding="utf-8") for name in ("cli.py", "router.py"))
     for key in schema:
         assert f'"{key}"' in source, f"{key} is declared but never read"
 
@@ -56,3 +59,6 @@ def test_provides_match_what_register_registers():
     assert MANIFEST.get("provides_tools", []) == ctx.tools == []
     assert MANIFEST.get("provides_hooks", []) == ctx.hooks == []
     assert [c["name"] for c in ctx.cli_commands] == ["onair"]
+    # Hermes has no provides_* key for TTS providers; the description names it.
+    assert [p.name for p in ctx.tts_providers] == ["onair"]
+    assert "tts.provider: onair" in MANIFEST["description"]

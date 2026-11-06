@@ -1,9 +1,11 @@
 """The one module that knows DropCast (AGENTS.md rule 4).
 
 Everything about DropCast lives here: the pinned install spec, how to tell
-whether the sidecar holds the pinned commit, and the CLI JSON contract
+whether the sidecar holds the pinned commit, the CLI JSON contract
 (``dropcast run … --adapter headless --headless --root DIR`` then
-``dropcast resume JOB``). Other modules only pass around the argv lists and
+``dropcast resume JOB``), and the single-text edge-tts render the voice
+router falls back to (``python -m dropcast.edgetts render``, see
+:func:`edge_render`). Other modules only pass around the argv lists and
 results this module returns.
 
 DropCast's Python internals are not public, so this module only drives the
@@ -492,3 +494,131 @@ def resume(
 ) -> JobResult:
     """Continue a DropCast job after the caller acted on its last status."""
     return _call(build_resume_argv(venv, job, root, answer), runner, env)
+
+
+# --- Single-text edge-tts render (the voice router's last engine). ---
+#
+# DropCast at the pin has no "speak this one text" command. The closest public
+# entry is the documented module CLI ``python -m dropcast.edgetts render SCRIPT
+# VOICES --out JOB [--voice SPEAKER=VOICE]`` (see its module docstring), which
+# prints one JSON object (exit 0 rendered, 1 not rendered, 2 usage error). This
+# section writes a one-segment script.json and an empty voices.json, pins the
+# one speaker's voice with ``--voice``, and reads ``episode`` from the JSON.
+
+EDGE_TIMEOUT_S = 180
+EDGE_MODULE = f"{PACKAGE}.edgetts"
+_EDGE_SPEAKER = "host"
+_LANG_TAG = re.compile(r"[a-z]{2,3}(-[A-Za-z0-9]{2,8})*")
+_EDGE_VOICE = re.compile(r"[A-Za-z]{2,3}-[A-Za-z0-9-]+")
+#: Show music is off for a single spoken text (DropCast's ``music.THEME_ENV``).
+_NO_THEME = {"DROPCAST_THEME": "off"}
+
+
+def edge_render_argv(venv: Path, job: Path, voice: str) -> list[str]:
+    """``python -m dropcast.edgetts render`` for the files :func:`edge_render` writes."""
+    if not _EDGE_VOICE.fullmatch(voice or ""):
+        raise AdapterError(f"not an edge-tts voice name: {voice!r}")
+    python = Path(venv) / "bin" / "python"
+    job = Path(job)
+    return [
+        str(python), "-I", "-m", EDGE_MODULE, "render",
+        str(job / "script.json"), str(job / "voices.json"),
+        "--out", str(job / "out"),
+        "--voice", f"{_EDGE_SPEAKER}={voice}",
+        "--timeout", str(EDGE_TIMEOUT_S - 30),
+    ]
+
+
+def edge_script(text: str, language: str) -> dict[str, Any]:
+    """A one-speaker, one-segment script.json (schema-valid at the pin)."""
+    words = len(text.split())
+    minutes = max(round(words / 150, 3), 0.01)
+    return {
+        "title": "On Air",
+        "format": "solo-explainer",
+        "language": language if _LANG_TAG.fullmatch(language or "") else "en",
+        "target_min": minutes,
+        "est_min": minutes,
+        "speakers": [{"id": _EDGE_SPEAKER, "name": "Host"}],
+        "segments": [{"id": "s1", "speaker": _EDGE_SPEAKER, "text": text}],
+    }
+
+
+def edge_render(
+    venv: Path,
+    text: str,
+    voice: str,
+    language: str,
+    job: Path,
+    *,
+    runner: Runner = subprocess.run,
+    env: Mapping[str, str] | None = None,
+) -> Path:
+    """Speak *text* with edge-tts *voice* through the sidecar; return the MP3 it wrote.
+
+    *job* is an empty scratch folder the caller owns and removes; the MP3 is
+    inside it. Raises :class:`AdapterError` on any failure. Free by
+    construction: edge-tts needs no key, the child env is scrubbed, and the
+    output is private use only (AGENTS.md rule 3).
+    """
+    if not text or not text.strip():
+        raise AdapterError("nothing to speak: empty text")
+    job = Path(job)
+    argv = edge_render_argv(venv, job, voice)
+    try:
+        (job / "script.json").write_text(
+            json.dumps(edge_script(text, language), ensure_ascii=False), encoding="utf-8"
+        )
+        (job / "voices.json").write_text('{"roles": {}}', encoding="utf-8")
+    except OSError as exc:
+        raise AdapterError(f"cannot write the edge-tts job: {exc.strerror or exc}") from None
+    child = child_env(env)
+    child.update(_NO_THEME)
+    try:
+        proc = runner(
+            argv,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=EDGE_TIMEOUT_S,
+            env=child,
+            check=False,
+        )
+    except FileNotFoundError:
+        raise AdapterError("the sidecar is not installed; run `hermes onair setup`") from None
+    except subprocess.TimeoutExpired:
+        raise AdapterError(f"edge-tts did not answer within {EDGE_TIMEOUT_S} s") from None
+    except OSError as exc:
+        raise AdapterError(f"edge-tts could not start: {exc.strerror or exc}") from None
+    data = _last_json_object(proc.stdout)
+    if proc.returncode != 0 or not data or data.get("rendered") is not True:
+        reason = data.get("reason") if data else None
+        if not isinstance(reason, str) or not reason:
+            tail = (proc.stderr or "").strip().splitlines()[-1:] or ["no detail"]
+            reason = tail[0]
+        raise AdapterError(f"edge-tts render failed (exit {proc.returncode}): {reason[:300]}")
+    episode = data.get("episode")
+    if not isinstance(episode, str) or not episode:
+        raise AdapterError("edge-tts result names no episode")
+    path = Path(episode)
+    try:
+        inside = path.resolve().is_relative_to(job.resolve())
+    except (OSError, RuntimeError):
+        inside = False
+    if not inside or path.is_symlink() or not path.is_file() or path.stat().st_size == 0:
+        raise AdapterError("edge-tts episode is missing, empty, or outside the job folder")
+    return path
+
+
+def _last_json_object(stdout: str | None) -> dict[str, Any] | None:
+    """The JSON object a module CLI printed (indented, maybe after stray lines)."""
+    text = (stdout or "").strip()
+    lines = text.splitlines()
+    for i in range(len(lines)):
+        if lines[i].startswith("{"):
+            try:
+                data = json.loads("\n".join(lines[i:]))
+            except ValueError:
+                continue
+            return data if isinstance(data, dict) else None
+    return None

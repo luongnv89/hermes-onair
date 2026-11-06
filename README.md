@@ -1,8 +1,8 @@
 # hermes-onair
 On Air: free voices and two-host audio shows for Hermes Agent (Hermes plugin)
 
-> Status: early scaffold (v0.1.0). This release ships the plugin skeleton and
-> `hermes onair setup`; the voice router, personas and `/onair` come next.
+> Status: early (v0.1.0). This release ships `hermes onair setup` and the free
+> voice router (`tts.provider: onair`); personas and `/onair` come next.
 
 ## Install
 
@@ -50,12 +50,54 @@ hermes onair setup --check   # report the sidecar's state; exit 0 when ready
   the repository was unreachable), or after a pin change, since the old
   sidecar no longer matches the pin.
 
+## Free voices: `tts.provider: onair`
+
+```yaml
+# config.yaml
+tts:
+  provider: onair
+```
+
+Hermes's `text_to_speech` then speaks through On Air. Each request is spoken by
+exactly one engine, the first in its language's chain that works:
+
+| Language | Chain |
+|----------|-------|
+| English | Fish (`fish-audio/s2.1-pro-free:free`) → HeyGen (`heygen/heygen-voice-1-turbo:free`) → edge-tts |
+| Any other | HeyGen → Fish → edge-tts |
+
+- **Free only.** Before an OpenRouter model is called, On Air reads the public
+  speech model list (no key sent), cached for up to 24 h in
+  `$HERMES_HOME/plugin-data/onair/openrouter-speech-models.json`. A model is
+  called only when it is listed exactly once, no listed price is non-zero,
+  and its id ends in `:free` or every listed price is zero. Without a list or
+  a fresh cache, OpenRouter is skipped.
+- **The key** comes only from the `OPENROUTER_API_KEY` environment variable.
+  Without it, On Air goes straight to edge-tts.
+- **Fall-through.** An engine is skipped on a missing key, a refused or failed
+  price check, any HTTP error (401, 402, 408, 429, 5xx, …), a network error or
+  timeout, an empty or invalid audio body, or a non-MP3 format with no ffmpeg.
+  The audio reaches the output path through a temp file and a rename; if it
+  cannot be written (disk full, no permission), the request stops there
+  instead of trying the next engine.
+- **HeyGen** answers raw PCM, which ffmpeg converts. Without ffmpeg, HeyGen is
+  skipped.
+- **edge-tts** renders in the sidecar (run `hermes onair setup` first). Its
+  audio is for private listening only: never publish it.
+- `tts.output_format` picks the file format (`mp3` by default; `wav`, `ogg`,
+  `opus` and `flac` need ffmpeg, and fail without it: MP3 is never written
+  under another format's name). `tts.voice: <engine>:<voice>` (for example
+  `edge:en-GB-RyanNeural`) sets one engine's voice.
+
 Settings (`plugins.entries.onair.settings` in `config.yaml`):
 
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `uv_bin` | `""` | Path or name of uv; empty looks it up on `PATH`. |
 | `sidecar_python` | `">=3.11"` | Python request for `uv venv --python`. |
+| `ffmpeg_bin` | `""` | A path (with `/` or a leading `~`) or a name looked up on `PATH`; empty looks on `PATH`, then for the newest `ffmpeg-*/bin/ffmpeg` in `$HERMES_HOME/tools`, then `~/.hermes/tools`. |
+| `language` | `auto` | Language of the text (`en`, `fr`, `vi`, …); `auto` detects en/fr/vi. |
+| `voices` | `{}` | Voice per engine and language, e.g. `{edge: {fr: fr-FR-HenriNeural}, heygen: {"*": tabitha}}`. |
 
 ## Develop
 
@@ -65,6 +107,13 @@ pip install -r requirements-dev.txt
 ruff check .
 pytest -q            # offline: network, DNS and new processes are blocked
 pytest -m live       # by hand only: tests that reach real services
+```
+
+The live smoke test speaks one English sentence through Fish and HeyGen (after
+the price gate). It reads the key from the environment only:
+
+```sh
+OPENROUTER_API_KEY=... pytest -m live tests/test_live.py -v -s
 ```
 
 - Tests marked `real_uv` may start only the `uv` on `PATH`, through

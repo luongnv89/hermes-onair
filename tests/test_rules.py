@@ -15,8 +15,9 @@ SKIP_DIRS = {".git", ".idd", "__pycache__", ".venv", "venv", "node_modules",
              ".ruff_cache", ".pytest_cache", ".mypy_cache"}
 CODE_AND_CONFIG = {".py", ".yaml", ".yml", ".toml", ".txt", ".cfg", ".ini", ".json"}
 HOST_MODULES = sorted(p for p in ROOT.glob("*.py"))
-# The one non-stdlib import the host side may make: Hermes's public storage helper.
-HERMES_IMPORTS = {"cli.py": {"plugins.plugin_storage"}}
+# The only non-stdlib imports the host side may make: Hermes's public storage
+# helper and the TTS provider base class.
+HERMES_IMPORTS = {"cli.py": {"plugins.plugin_storage"}, "router.py": {"agent.tts_provider"}}
 
 
 def repo_files():
@@ -81,7 +82,9 @@ def test_other_host_modules_never_name_dropcast_in_code():
 
 
 def test_host_side_imports_only_the_stdlib():
-    assert {p.name for p in HOST_MODULES} >= {"__init__.py", "adapter.py", "cli.py", "sidecar.py"}
+    assert {p.name for p in HOST_MODULES} >= {
+        "__init__.py", "adapter.py", "cli.py", "sidecar.py", "router.py", "openrouter.py"
+    }
     for path in HOST_MODULES:
         allowed = HERMES_IMPORTS.get(path.name, set())
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -98,3 +101,29 @@ def test_no_openrouter_key_values_in_the_repo():
     for path in repo_files():
         text = path.read_text(encoding="utf-8", errors="replace")
         assert not key.search(text), path
+
+
+def test_the_key_is_read_only_from_the_environment():
+    # Rule 2: one reader of OPENROUTER_API_KEY, from os.environ; no other module names it in code.
+    readers = []
+    for path in HOST_MODULES:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        if "OPENROUTER_API_KEY" in set(strings_outside_docstrings(tree)):
+            readers.append(path.name)
+    assert sorted(readers) == ["adapter.py", "openrouter.py"]  # adapter only scrubs it
+    source = (ROOT / "openrouter.py").read_text(encoding="utf-8")
+    assert "os.environ if environ is None else environ" in source
+
+
+def test_only_the_router_registers_models_it_may_call():
+    # Rule 1: the models the plugin calls are the two free ids, and every call goes
+    # through openrouter.speech, which runs the price gate first.
+    from onair import openrouter, router
+
+    assert set(router.MODELS.values()) == {
+        "fish-audio/s2.1-pro-free:free", "heygen/heygen-voice-1-turbo:free"
+    }
+    source = (ROOT / "openrouter.py").read_text(encoding="utf-8")
+    speech = source[source.index("def speech("):]
+    assert speech.index("catalog.check(model)") < speech.index("http(\"POST\"")
+    assert openrouter.SPEECH_URL.startswith("https://")
