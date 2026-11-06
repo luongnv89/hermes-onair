@@ -840,3 +840,37 @@ def test_no_free_temp_name_stops_the_request(tmp_path, data_dir, monkeypatch):
         router.speak(EN, out_dir / "x.mp3", env=environment(data_dir, FakeHttp()), language="en")
     assert sorted(p.name for p in out_dir.iterdir()) == [".x.mp3.cccccccccccc.part"]
 
+
+# ---------------------------------- review r2, N8: the active profile's home
+
+
+def test_synthesize_looks_for_ffmpeg_in_the_active_profiles_home(tmp_path, monkeypatch):
+    launch = tmp_path / "root"  # $HERMES_HOME: the profile Hermes was started with
+    active = tmp_path / "root" / "profiles" / "work"  # the profile this call runs for
+    tool(launch / "tools", "ffmpeg-10.0-linux-x64")
+    mine = tool(active / "tools", "ffmpeg-8.0-linux-x64")
+    monkeypatch.setenv("HERMES_HOME", str(launch))
+    data = active / "plugin-data" / "onair"  # what plugin_data_dir() returns for "work"
+    write_install(data / "sidecar")
+    run = FakeRunner().on(lambda argv: argv[0] == mine, ffmpeg_ok).on(is_edge, edge_ok)
+    tts = router.OnAirTTS(Config(), lambda: data, http=FakeHttp(), runner=run,
+                          which=lambda name: None)
+    out = tmp_path / "x.wav"
+    tts.synthesize(EN, str(out), format="wav")  # edge MP3 -> wav needs ffmpeg
+    assert [a[0] for a in run.argvs()] == [str(data / "sidecar" / "bin" / "python"), mine]
+    assert out.read_bytes() == CONVERTED
+
+
+def test_active_hermes_home():
+    assert router.active_hermes_home(Path("/h/profiles/a/plugin-data/onair")) == Path(
+        "/h/profiles/a"
+    )
+    assert router.active_hermes_home(Path("/somewhere/else")) is None
+
+
+def test_managed_ffmpeg_prefers_a_given_home_over_the_env(tmp_path):
+    tool(tmp_path / "env-home" / "tools", "ffmpeg-10.0-linux-x64")
+    given = tool(tmp_path / "given" / "tools", "ffmpeg-7.0-linux-x64")
+    environ = {"HERMES_HOME": str(tmp_path / "env-home")}
+    assert router.managed_ffmpeg(home=tmp_path / "nohome", environ=environ,
+                                 hermes_home=tmp_path / "given") == given

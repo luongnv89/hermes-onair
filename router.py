@@ -188,18 +188,24 @@ def _ffmpeg_version(directory: Path) -> tuple[int, ...]:
 
 
 def managed_ffmpeg(
-    home: Path | None = None, environ: Mapping[str, str] | None = None
+    home: Path | None = None,
+    environ: Mapping[str, str] | None = None,
+    hermes_home: Path | None = None,
 ) -> str | None:
     """Hermes's managed ffmpeg: newest ``tools/ffmpeg-*/bin/ffmpeg``.
 
-    ``$HERMES_HOME/tools`` first when set, then ``~/.hermes/tools``; within a
-    folder the highest version wins (by number, so 10.x beats 9.x).
+    The Hermes home's ``tools`` first, then ``~/.hermes/tools``; within a
+    folder the highest version wins (by number, so 10.x beats 9.x). The home
+    is *hermes_home* when given (the provider passes the active profile's
+    home), else ``$HERMES_HOME`` from *environ*.
     """
-    env = os.environ if environ is None else environ
     roots = []
-    hermes_home = (env.get("HERMES_HOME") or "").strip()
-    if hermes_home:
-        roots.append(Path(hermes_home).expanduser() / "tools")
+    if hermes_home is None:
+        env = os.environ if environ is None else environ
+        value = (env.get("HERMES_HOME") or "").strip()
+        hermes_home = Path(value).expanduser() if value else None
+    if hermes_home is not None:
+        roots.append(Path(hermes_home) / "tools")
     roots.append((home or Path.home()) / ".hermes" / "tools")
     for tools in roots:
         dirs = sorted(tools.glob("ffmpeg-*"), key=_ffmpeg_version, reverse=True)
@@ -215,6 +221,7 @@ def find_ffmpeg(
     which: Which = shutil.which,
     home: Path | None = None,
     environ: Mapping[str, str] | None = None,
+    hermes_home: Path | None = None,
 ) -> str | None:
     """ffmpeg: the ``ffmpeg_bin`` setting, else PATH, else Hermes's managed copy.
 
@@ -227,7 +234,7 @@ def find_ffmpeg(
             path = Path(os.path.abspath(os.path.expanduser(value)))  # "./ffmpeg" stays a path
             return str(path) if path.is_file() and os.access(path, os.X_OK) else None
         return which(value)
-    return which("ffmpeg") or managed_ffmpeg(home, environ)
+    return which("ffmpeg") or managed_ffmpeg(home, environ, hermes_home)
 
 
 # ------------------------------------------------------------------- engines
@@ -477,6 +484,20 @@ def speak(
 
 # ------------------------------------------------------------------ provider
 
+
+def active_hermes_home(data_dir: Path) -> Path | None:
+    """The Hermes home behind the plugin data dir (``<home>/plugin-data/onair``).
+
+    The data dir comes from Hermes's ``plugin_data_dir``, which follows the
+    active profile (``get_hermes_home()``, including a per-task override), so
+    this is that profile's home; ``$HERMES_HOME`` may still name the launch
+    profile. None when the data dir has another shape.
+    """
+    data_dir = Path(data_dir)
+    if data_dir.parent.name == "plugin-data":
+        return data_dir.parent.parent
+    return None
+
 GetConfig = Callable[..., Any]
 
 
@@ -542,12 +563,12 @@ class OnAirTTS(TTSProvider):
         **extra: Any,
     ) -> str:
         fmt = (format or DEFAULT_FORMAT).strip().lower()
-        env = Environment(
-            data_dir=Path(self._data_dir()),
-            ffmpeg=find_ffmpeg(self._setting("ffmpeg_bin", DEFAULT_FFMPEG_BIN), self._which),
-            http=self._http,
-            runner=self._runner,
+        data_dir = Path(self._data_dir())
+        ffmpeg = find_ffmpeg(
+            self._setting("ffmpeg_bin", DEFAULT_FFMPEG_BIN), self._which,
+            environ={}, hermes_home=active_hermes_home(data_dir),
         )
+        env = Environment(data_dir=data_dir, ffmpeg=ffmpeg, http=self._http, runner=self._runner)
         language = resolve_language(self._setting("language", DEFAULT_LANGUAGE), text)
         speak(
             text, output_path, env=env, language=language, fmt=fmt,
