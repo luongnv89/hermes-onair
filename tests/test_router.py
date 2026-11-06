@@ -275,6 +275,23 @@ def test_an_empty_or_invalid_fish_body_falls_through(tmp_path, data_dir, key, an
     assert speak(tmp_path, environment(data_dir, http))[0] == "heygen"
 
 
+def test_heygen_pcm_starting_with_a_brace_is_spoken(tmp_path, data_dir, key):
+    # Review r1, N5: valid PCM whose first byte is 0x7B is not taken for JSON.
+    pcm = b"{\x00" + PCM_BYTES
+    http = FakeHttp(speech={FISH: status(500), HEYGEN: audio(pcm, "audio/pcm;rate=44100")})
+    run = runner()
+    assert speak(tmp_path, environment(data_dir, http, run))[0] == "heygen"
+
+
+@pytest.mark.parametrize("body", [b'  {"looks": "json"}', b"<html></html>"])
+def test_a_fish_error_page_typed_audio_mpeg_still_falls_through(tmp_path, data_dir, key, body):
+    # The sniff is skipped for audio/*; Fish's MP3 check still refuses it.
+    http = FakeHttp(speech={FISH: audio(body, "audio/mpeg"), HEYGEN: audio(PCM_BYTES)})
+    env = environment(data_dir, http)
+    assert speak(tmp_path, env)[0] == "heygen"
+    assert "not MP3 audio" in env.attempts[0]["error"]
+
+
 @pytest.mark.parametrize("body", [b"", b"\x00", b"\x00\x01\x02"])
 def test_an_empty_or_odd_pcm_body_falls_through(tmp_path, data_dir, key, body):
     http = FakeHttp(speech={FISH: status(500), HEYGEN: audio(body, "audio/pcm")})

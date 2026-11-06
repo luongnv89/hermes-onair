@@ -238,13 +238,27 @@ def test_network_errors_raise(tmp_path, error):
         audio(b""),
         audio(b'{"error": "x"}', "application/json"),
         audio(b"oops", "text/plain"),
-        audio(b'  {"looks": "json"}', "audio/mpeg"),
-        audio(b"<html></html>", "audio/mpeg"),
+        # No audio/* type: the body is sniffed for an error document.
+        audio(b'  {"looks": "json"}', ""),
+        audio(b"<html></html>", "application/octet-stream"),
+        audio(b'[{"error": 1}]', "binary/octet-stream"),
     ],
 )
 def test_a_body_that_is_not_audio_raises(tmp_path, answer):
     with pytest.raises(openrouter.OpenRouterError):
         speak(tmp_path, FakeHttp(speech={FISH: answer}))
+
+
+@pytest.mark.parametrize("first", [b"{", b"[", b"<", b" {", b"\n<"])
+def test_pcm_starting_like_json_is_audio_when_typed_audio(tmp_path, first):
+    # Review r1, N5: the JSON/HTML sniff no longer runs on an audio/* answer.
+    pcm = first + b"\x00" * (2001 - len(first))
+    http = FakeHttp(speech={HEYGEN: audio(pcm, "audio/pcm;rate=44100;channels=1")})
+    response = openrouter.speech(
+        HEYGEN, "Hi.", "nadine", "pcm", catalog=catalog(tmp_path, http), http=http,
+        environ={"OPENROUTER_API_KEY": KEY},
+    )
+    assert response.body == pcm
 
 
 def test_the_key_never_reaches_an_error_or_a_log(tmp_path, caplog):

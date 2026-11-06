@@ -344,7 +344,11 @@ def speech(
         raise OpenRouterError("empty audio body")
     if len(audio) > MAX_AUDIO_BYTES:
         raise OpenRouterError("audio body is too large")
-    if "json" in ctype or ctype.startswith("text/") or _JSONISH.match(audio[:64]):
+    if "json" in ctype or ctype.startswith("text/"):
+        raise OpenRouterError(f"no audio in the answer (Content-Type {ctype!r})")
+    # Sniff for an error page only when the answer does not say it is audio:
+    # raw PCM may well start with a byte that reads as "{", "[" or "<".
+    if not ctype.startswith("audio/") and _JSONISH.match(audio[:64]):
         raise OpenRouterError(f"no audio in the answer (Content-Type {ctype or 'none'!r})")
     return response
 
