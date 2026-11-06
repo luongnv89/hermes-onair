@@ -28,9 +28,11 @@ persona keeps one gender on every engine (DropCast's casting, and a pitch
 measurement for the 2 HeyGen voices DropCast does not cast).
 
 **Claims.** The first time a profile speaks (or runs ``/onair voice``), it
-claims a persona. The probe starts at ``sha256(profile) % len(POOL)`` and
-skips personas that sibling profiles hold. A plain hash collides on 3 of 8
-real names; the claim does not. The claim is written atomically (a temp
+claims a persona. The probe walks the pool from ``sha256(profile) %
+len(POOL)`` and takes the first free persona **that has a Fish voice**;
+only when none of those is free does it take a free one without Fish. So
+with 7 Fish voices, 9 profiles leave at most 2 without Fish. A plain hash
+collides on 3 of 8 real names; the claim does not. The claim is written atomically (a temp
 file and ``os.replace``) to that profile's own
 ``plugin-data/onair/persona.json`` and read back on every later call, so it
 survives restarts and later profiles never move it.
@@ -181,14 +183,18 @@ def hash_index(profile: str) -> int:
 
 
 def probe(profile: str, held: Mapping[str, Any]) -> Persona:
-    """The first persona from the profile's hash that no one in *held* has.
+    """The persona a profile claims, walking the pool from its hash.
 
-    *held* maps persona id -> its holders (any sized collection). When every
-    persona is held, the least-held one in probe order is shared.
+    *held* maps persona id -> its holders (any sized collection). Ranked by
+    fewest holders, then a Fish voice before none, then probe order: the
+    first free Fish-capable persona; else the first free one without Fish;
+    once every persona is held, the least-held one is shared. Deterministic:
+    the same *profile* and *held* always give the same persona.
     """
     start = hash_index(profile)
     order = [POOL[(start + i) % len(POOL)] for i in range(len(POOL))]
-    return min(order, key=lambda p: len(held.get(p.id) or ()))  # min keeps the first of ties
+    # min keeps the first of equal keys, so ties stay in probe order.
+    return min(order, key=lambda p: (len(held.get(p.id) or ()), p.fish is None))
 
 
 # ------------------------------------------------------------------ profiles

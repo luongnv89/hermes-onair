@@ -96,10 +96,12 @@ exactly one engine, the first in its language's chain that works:
 
 Each profile speaks as its own **persona**: a named character with one voice
 per engine and, for edge-tts, per language. A profile claims one the first
-time it speaks (or runs `/onair voice`): the probe starts at
-`sha256(profile) % 10` and skips personas other profiles of the same Hermes
-root hold, so up to 10 profiles never share a voice. The claim is stored in
-that profile's `plugin-data/onair/persona.json` and survives restarts.
+time it speaks (or runs `/onair voice`): the probe walks the pool from
+`sha256(profile) % 10`, skips personas other profiles of the same Hermes root
+hold, and takes a free persona with a Fish voice before one without, so up to
+10 profiles never share a voice and, with 7 Fish voices, the first 7 all get
+one. The claim is stored in that profile's `plugin-data/onair/persona.json`
+and survives restarts.
 
 ```text
 /onair voice                       this profile's persona and voices

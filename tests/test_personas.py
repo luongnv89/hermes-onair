@@ -6,6 +6,7 @@ import contextlib
 import importlib
 import json
 import os
+import random
 import threading
 import time
 from collections import Counter
@@ -134,6 +135,25 @@ def test_nine_real_profiles_get_nine_distinct_stable_personas(tmp_path, order):
     finally:
         importlib.reload(personas)
     assert after == ids == {name: stored(root, name) for name in names}
+    # 7 Fish voices for 9 profiles: at most 2 go without Fish (review r1, nit 4).
+    assert sum(c.persona.fish is None for c in first.values()) == 2
+
+
+def test_no_claim_order_leaves_more_than_two_real_profiles_without_fish():
+    # All 9! orders are checked in the PR; a seeded sample keeps this test fast.
+    rng = random.Random(5)  # noqa: S311 - a seeded sample of claim orders, not crypto
+    for _ in range(500):
+        order = rng.sample(REAL_NAMES, len(REAL_NAMES))
+        held: dict[str, list[str]] = {}
+        for name in order:
+            held.setdefault(personas.probe(name, held).id, []).append(name)
+        assert len(held) == 9
+        assert sum(personas.BY_ID[i].fish is None for i in held) <= 2
+
+
+def order_from(profile):
+    start = personas.hash_index(profile)
+    return [personas.POOL[(start + i) % len(personas.POOL)] for i in range(len(personas.POOL))]
 
 
 def test_a_new_profile_never_moves_an_existing_claim(tmp_path):
@@ -158,26 +178,38 @@ def test_profiles_with_the_same_hash_probe_to_the_next_free_persona(tmp_path):
     assert len(same) >= 2  # forge, freetokens and french share a slot
     root = make_root(tmp_path, same)
     got = [claim(root, name).persona for name in same]
-    start = personas.hash_index("forge")
-    want = [personas.POOL[(start + i) % len(personas.POOL)] for i in range(len(same))]
-    assert got == want
+    want = [p for p in order_from("forge") if p.fish][:len(same)]  # Fish-capable first
+    assert got == want and len({p.id for p in got}) == len(same)
 
 
 def test_the_probe_starts_at_the_hash_and_skips_held_personas():
-    start = personas.hash_index("forge")
-    first = personas.POOL[start]
-    second = personas.POOL[(start + 1) % len(personas.POOL)]
-    assert personas.probe("forge", {}) is first
-    assert personas.probe("forge", {first.id: ["mail"]}) is second
+    first, second = [p for p in order_from("mail") if p.fish][:2]
+    assert first is personas.POOL[personas.hash_index("mail")]  # mail's start has Fish
+    assert personas.probe("mail", {}) is first
+    assert personas.probe("mail", {first.id: ["forge"]}) is second
+
+
+def test_the_probe_prefers_a_free_persona_with_a_fish_voice():
+    start = personas.POOL[personas.hash_index("forge")]
+    assert start.fish is None  # forge hashes to a persona without Fish …
+    want = next(p for p in order_from("forge") if p.fish)
+    assert personas.probe("forge", {}) is want  # … and skips to the next one with Fish
+    fish_held = {p.id: ["x"] for p in personas.POOL if p.fish}
+    assert personas.probe("forge", fish_held) is start  # only then a free one without Fish
+
+
+def test_the_probe_is_deterministic():
+    held = {"bob": ["a"], "maya": ["b"]}
+    assert len({personas.probe("forge", dict(held)).id for _ in range(20)}) == 1
 
 
 def test_a_full_pool_shares_the_least_held_persona():
     held = {p.id: ["a"] for p in personas.POOL}
-    start = personas.hash_index("eleven")
-    assert personas.probe("eleven", held) is personas.POOL[start]
-    pick = personas.POOL[(start + 3) % len(personas.POOL)]
+    first_fish = next(p for p in order_from("eleven") if p.fish)
+    assert personas.probe("eleven", held) is first_fish  # equally held: Fish first
+    pick = order_from("eleven")[3]
     held = {p.id: ["a", "b"] for p in personas.POOL} | {pick.id: ["a"]}
-    assert personas.probe("eleven", held) is pick
+    assert personas.probe("eleven", held) is pick  # the least held wins, Fish or not
 
 
 # -------------------------------------------------------------------- race
@@ -298,7 +330,7 @@ def test_custom_profile_claims_under_its_home_dir_name(tmp_path):
     got = personas.safe_claim(data_of(root, "forge"), lambda: "custom", home_of(root, "forge"))
     assert got.profile == "forge"
     assert json.loads((data_of(root, "forge") / "persona.json").read_text())["profile"] == "forge"
-    assert got.persona is personas.POOL[personas.hash_index("forge")]
+    assert got.persona is personas.probe("forge", {})
 
 
 def test_safe_claim_survives_a_broken_profile_name_and_a_broken_claim(tmp_path, monkeypatch):
@@ -344,7 +376,7 @@ def test_an_unwritable_claim_still_speaks_unstored(tmp_path, monkeypatch):
     monkeypatch.setattr(personas, "write_record",
                         lambda *a: (_ for _ in ()).throw(PermissionError(13, "denied")))
     got = claim(root, "forge")
-    assert got.status == "unstored" and got.persona is personas.POOL[personas.hash_index("forge")]
+    assert got.status == "unstored" and got.persona is personas.probe("forge", {})
 
 
 @pytest.mark.parametrize(("content", "reason"), [
