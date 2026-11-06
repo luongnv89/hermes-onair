@@ -43,7 +43,8 @@ def test_config_schema_shape():
 def test_config_schema_matches_the_code():
     schema = MANIFEST["config_schema"]
     assert set(schema) == {
-        "uv_bin", "sidecar_python", "ffmpeg_bin", "language", "voices", "episode_minutes"
+        "uv_bin", "sidecar_python", "ffmpeg_bin", "language", "voices", "episode_minutes",
+        "keep_episodes",
     }
     assert schema["uv_bin"]["default"] == sidecar.DEFAULT_UV_BIN
     assert schema["sidecar_python"]["default"] == sidecar.DEFAULT_SIDECAR_PYTHON
@@ -51,6 +52,7 @@ def test_config_schema_matches_the_code():
     assert schema["language"]["default"] == router.DEFAULT_LANGUAGE
     assert schema["voices"] == {**schema["voices"], "type": "dict", "default": {}}
     assert schema["episode_minutes"]["default"] == episode.DEFAULT_MINUTES
+    assert schema["keep_episodes"]["default"] == episode.KEEP_EPISODES
     names = ("cli.py", "router.py", "episode.py")
     source = "".join((ROOT / name).read_text(encoding="utf-8") for name in names)
     for key in schema:

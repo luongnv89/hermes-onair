@@ -70,3 +70,9 @@ config_schema:
       Target length of an `/onair` episode in minutes (1 to 5), when the
       request names none. The script is capped at about 150 spoken words
       per minute of it.
+  keep_episodes:
+    type: int
+    default: 30
+    description: >-
+      How many episode folders to keep under the plugin data dir; older ones
+      are removed after each new episode. 0 keeps every episode.

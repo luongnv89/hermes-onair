@@ -18,9 +18,13 @@
    rendered by the engine itself on ``resume`` (private use only, rule 3).
 5. **Deliver** the MP3 and its WebVTT transcript (``transcript.vtt``).
 
-Two hosts, two personas: the profile's own persona (:mod:`personas`) voices
-the host of its voice type, and a second persona of the other type, the
-next one in the pool, voices the other host. Each job runs under its own
+Two hosts, two personas: the profile's own persona (:mod:`personas`) hosts in
+its own name and voice (the host of its voice type), and a second persona of
+the other type, the next one in the pool, is the co-host. The show keeps the
+engine's fixed name, opening and sign-off; only the hosts are renamed
+(``show.hosts`` and ``speakers[].name``, which its checks accept). The job
+folder the engine names must lie inside the episode's folder, and only the
+newest ``keep_episodes`` episode folders are kept. Each job runs under its own
 folder in the plugin data dir (``episodes/<stamp>``), and ``onair.json``
 there records the engine, voices, script source, the model id ``ctx.llm``
 returned and the timings.
@@ -28,6 +32,7 @@ returned and the timings.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import re
@@ -51,6 +56,8 @@ MIN_MINUTES = 1.0  # the show's fixed lines alone fill about half a minute
 MAX_MINUTES = 5.0
 EPISODES_DIR = "episodes"
 RECORD_FILE = "onair.json"
+#: Episode folders kept in the plugin data dir (setting ``keep_episodes``; 0 keeps all).
+KEEP_EPISODES = 30
 _URL = re.compile(r"https?://\S+", re.IGNORECASE)
 _LANG = re.compile(r"[a-z]{2,3}(-[a-z0-9]{2,8})*", re.IGNORECASE)
 
@@ -109,7 +116,7 @@ class Episode:
     duration_s: float | None
     engine: str
     voices: dict[str, str]
-    hosts: dict[str, str]  # host name -> persona name
+    hosts: dict[str, str]  # host name (a persona's name) -> persona id
     script_source: str  # "llm" or "template"
     model: str | None  # the model id ctx.llm returned
     llm_error: str | None
@@ -270,6 +277,7 @@ def make_episode(
     llm: Any,
     ffmpeg_setting: Any = "",
     tools: Tools | None = None,
+    keep: int = KEEP_EPISODES,
 ) -> Episode:
     """Run the whole pipeline; raise :class:`EpisodeError` when no episode can be made."""
     tools = tools or Tools()
@@ -286,12 +294,17 @@ def make_episode(
 
     # 1. ingest
     result = _ingest(request, venv, root, tools)
-    job = Path(result.job or "")
+    job = _job_inside(result.job, root)
     try:
         brief = adapter.read_brief(job)
         source = adapter.read_source(job)
     except adapter.AdapterError as exc:
         raise EpisodeError(f"could not read the brief: {exc}") from None
+    # Two hosts, two personas: the show keeps its name; its hosts take the personas' names.
+    hosts = cast(persona)
+    brief = dataclasses.replace(
+        brief, names={sid: hosts[sid].name if sid in hosts else name
+                      for sid, name in brief.names.items()})
     timings["ingest_s"] = round(clock() - t0, 1)
 
     # 2. script: ctx.llm, then the template on failure
@@ -310,16 +323,25 @@ def make_episode(
     retarget: float | None = None
     verdict = None
     if draft is not None:
-        verdict, retarget = _check(draft, brief, source, job, venv, tools)
-        if not verdict.ok:
-            llm_error = "the model's script failed the checks: " + "; ".join(verdict.errors)[:300]
+        try:
+            verdict, retarget = _check(draft, brief, source, job, venv, tools)
+        except adapter.AdapterError as exc:  # the check broke on the model's script
+            llm_error = f"the checks could not run on the model's script: {exc}"[:300]
             draft = None
+        else:
+            if not verdict.ok:
+                llm_error = ("the model's script failed the checks: "
+                             + "; ".join(verdict.errors)[:300])
+                draft = None
     if draft is None:
         try:
             draft = writer.template_draft(brief, source, reason=llm_error)
         except writer.ScriptFailed as exc:
             raise EpisodeError(f"no script: {exc}") from None
-        verdict, retarget = _check(draft, brief, source, job, venv, tools)
+        try:
+            verdict, retarget = _check(draft, brief, source, job, venv, tools)
+        except adapter.AdapterError as exc:
+            raise EpisodeError(str(exc)) from None
         if not verdict.ok:
             raise EpisodeError("the script failed the checks: " + "; ".join(verdict.errors)[:400])
     timings["checks_s"] = round(clock() - t2, 1)
@@ -327,7 +349,6 @@ def make_episode(
     # 4. render: one engine for the whole episode
     t3 = clock()
     language = writer.primary(brief.language)
-    hosts = cast(persona)
     home = router.active_hermes_home(data_dir)
     env = router.Environment(
         data_dir=data_dir,
@@ -335,7 +356,10 @@ def make_episode(
         http=tools.http, runner=tools.runner, environ=tools.environ,
     )
     key = openrouter.api_key(tools.environ)
-    lines = adapter.script_lines(job)
+    try:
+        lines = adapter.script_lines(job)
+    except adapter.AdapterError as exc:
+        raise EpisodeError(str(exc)) from None
     skipped: list[dict[str, str]] = []
     finished: adapter.Finished | None = None
     engine_used = ""
@@ -374,7 +398,7 @@ def make_episode(
         duration_s=round(finished.duration_s, 1) if finished.duration_s else None,
         engine=engine_used,
         voices={brief.names[sid]: v for sid, v in voices.items()},
-        hosts={brief.names[sid]: p.name for sid, p in hosts.items()},
+        hosts={brief.names[sid]: p.id for sid, p in hosts.items()},
         script_source=draft.source,
         model=model if draft.source == "llm" else None,
         llm_error=llm_error,
@@ -390,7 +414,50 @@ def make_episode(
                                        encoding="utf-8")
     except OSError as exc:
         log.warning("episode: cannot write %s (%s)", RECORD_FILE, exc.strerror or exc)
+    prune(data_dir / EPISODES_DIR, keep, current=root)
     return episode
+
+
+_STAMP = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}")
+
+
+def prune(episodes: Path, keep: int, *, current: Path | None = None) -> list[Path]:
+    """Remove the oldest episode folders past the newest *keep* (0 keeps every one).
+
+    Only real folders named like an episode stamp are touched; never *current*,
+    never a symbolic link. Returns what was removed; a failure is logged, not raised.
+    """
+    if keep <= 0:
+        return []
+    try:
+        folders = sorted(
+            (p for p in Path(episodes).iterdir()
+             if _STAMP.fullmatch(p.name) and p.is_dir() and not p.is_symlink()),
+            key=lambda p: p.name,
+        )
+    except OSError:
+        return []
+    removed = []
+    for folder in folders[:-keep] if len(folders) > keep else []:
+        if current is not None and folder == current:
+            continue
+        try:
+            shutil.rmtree(folder)
+            removed.append(folder)
+        except OSError as exc:
+            log.warning("episode: cannot remove old episode %s (%s)", folder.name,
+                        exc.strerror or exc)
+    return removed
+
+
+def _job_inside(job: str | None, root: Path) -> Path:
+    """The job folder the engine named, which must be a folder inside *root*."""
+    if not job:
+        raise EpisodeError("the engine named no job folder")
+    path = Path(job).resolve()
+    if not path.is_relative_to(Path(root).resolve()) or not path.is_dir():
+        raise EpisodeError("the engine named a job folder outside this episode's folder")
+    return path
 
 
 # --------------------------------------------------------------------- reply
@@ -401,10 +468,10 @@ ENGINE_LABEL = {router.FISH: "Fish (OpenRouter, free)", router.HEYGEN: "HeyGen (
 
 def reply(episode: Episode) -> str:
     """The chat reply: what was made and how, ending with the ``MEDIA:`` line."""
-    hosts = " & ".join(f"{name} (persona {persona})" for name, persona in episode.hosts.items())
+    hosts = " & ".join(episode.hosts)
     length = f"{episode.duration_s:.0f} s" if episode.duration_s else "length unknown"
     lines = [f'On Air: "{episode.title}" ({length}, {episode.language}). '
-             f"Hosts {hosts}, profile {episode.profile}."]
+             f"Hosts {hosts} (voice personas), profile {episode.profile}."]
     voices = ", ".join(f"{name} {voice}" for name, voice in episode.voices.items())
     voice_line = f"Voices: {ENGINE_LABEL.get(episode.engine, episode.engine)}: {voices}."
     if episode.engines_skipped:
@@ -498,7 +565,9 @@ class Host:
         except Exception as exc:  # no ctx.llm in this Hermes: the template speaks
             log.warning("episode: ctx.llm unavailable (%s)", type(exc).__name__)
             llm = None
+        keep = self.setting("keep_episodes", KEEP_EPISODES)
+        keep = keep if isinstance(keep, int) and not isinstance(keep, bool) else KEEP_EPISODES
         return make_episode(
             request, data_dir=directory, profile=profile, persona=persona, llm=llm,
-            ffmpeg_setting=self.setting("ffmpeg_bin", ""), tools=self.tools,
+            ffmpeg_setting=self.setting("ffmpeg_bin", ""), tools=self.tools, keep=keep,
         )

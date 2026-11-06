@@ -962,15 +962,20 @@ def script_lines(job: str | Path) -> list[tuple[str, str, str]]:
 
 
 def write_voices(path: Path, brief: Brief, voices: Mapping[str, str]) -> Path:
-    """A ``voices.json`` giving each host (speaker id -> edge-tts voice) its voice."""
+    """A ``voices.json`` giving each host (speaker id -> edge-tts voice) its voice.
+
+    Keys are ``host-<name>/<lang>`` (how the engine voices Bob and Alice) and
+    ``<role>/<lang>`` (how it voices a host with any other name).
+    """
     roles: dict[str, Any] = {}
     primary = brief.language.split("-", 1)[0].lower()
     for sid, voice in voices.items():
         if not _EDGE_VOICE.fullmatch(voice or ""):
             raise AdapterError(f"not an edge-tts voice name: {voice!r}")
-        host = f"host-{brief.names[sid].lower()}"
-        for lang in dict.fromkeys((brief.language, primary)):
-            roles[f"{host}/{lang}"] = {"edgetts": voice}
+        # A host named Bob or Alice is voiced by name; any other host by its role.
+        for key in (f"host-{brief.names[sid].lower()}", brief.roles[sid]):
+            for lang in dict.fromkeys((brief.language, primary)):
+                roles[f"{key}/{lang}"] = {"edgetts": voice}
     try:
         Path(path).write_text(json.dumps({"roles": roles}, indent=1), encoding="utf-8")
     except OSError as exc:

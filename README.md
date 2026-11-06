@@ -160,6 +160,7 @@ Settings (`plugins.entries.onair.settings` in `config.yaml`):
 | `language` | `auto` | Language of the text (`en`, `fr`, `vi`, …); `auto` detects en/fr/vi. |
 | `voices` | `{}` | Voice per engine and language, e.g. `{edge: {fr: fr-FR-HenriNeural}, heygen: {"*": tabitha}}`. Speech only: an episode's two hosts keep their personas' voices. |
 | `episode_minutes` | `1.0` | Target length of an `/onair` episode (1 to 5 minutes) when the request names none. |
+| `keep_episodes` | `30` | Episode folders kept under the plugin data dir; older ones are removed after each new episode. `0` keeps all. |
 
 ## Episodes: `/onair <link or text>` and `onair_episode`
 
@@ -183,21 +184,30 @@ id and the timings.
    en, fr and vi are supported), no guests.
 2. **Script**: written by **your own configured model** through `ctx.llm`, so
    its cost follows your model choice; On Air passes no model override and
-   records the model id the call returns. One retry with backoff; a hard cap
-   of about 150 spoken words per minute; lines must quote the source. When
+   records the model id the call returns. One retry with backoff (a
+   Retry-After of up to 10 s is honoured); a hard cap of about 150 spoken
+   words per minute; lines must quote the source, and a line with a link,
+   web address, email or phone number is dropped. The source is passed as
+   fenced data the model is told never to follow. The answer is read
+   leniently (a fenced block, prose around it, a `<think>` block, a trailing
+   comma); when none can be read, the reply says what came back. When
    the model fails (free models often answer HTTP 429), a built-in template
-   built from sentences of the source is used instead, and the reply says so.
+   built from sentences of the source is used instead (never a sentence
+   with a link, web address, email or phone number), and the reply says so.
 3. **Checks**: DropCast's own script checks (show order, fixed lines,
    fact-check quotes, length). An LLM script that fails them is replaced by
    the template.
 4. **Render**: one engine for the whole episode, never mixed: Fish (English
    first) or HeyGen, OpenRouter's free models behind the price gate, when
    `OPENROUTER_API_KEY` is set; otherwise edge-tts. Two hosts, two personas:
-   your profile's persona voices the host of its voice type, the next
-   persona of the other type voices the other host.
+   your profile's persona hosts in its own name and voice, with the next
+   persona of the other voice type as co-host. The show itself keeps
+   DropCast's fixed name, opening and sign-off ("Build Wiz AI Show"): its
+   script checks accept no other.
 5. **Deliver**: `episode.mp3` and `transcript.vtt` under
    `$HERMES_HOME/plugin-data/onair/episodes/<stamp>/jobs/<job>/`, with
-   `onair.json` (engine, voices, script source, model id, timings).
+   `onair.json` (engine, voices, script source, model id, timings). The
+   newest `keep_episodes` (30) episode folders are kept; older ones are removed.
 
 Episodes voiced by edge-tts are for your private listening only: the reply
 says so. Never publish them.

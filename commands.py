@@ -169,9 +169,16 @@ def parse_episode_args(raw_args: str) -> tuple[str, str | None, str | None]:
 
 
 def _is_voice_command(args: list[str]) -> bool:
+    """``voice``, ``voice list``, or ``voice set <name> [--force]``; anything longer is
+    a text to record ("voice set the stage for…" is an episode, not a command)."""
     if not args or args[0].lower() != "voice":
         return False
-    return len(args) == 1 or args[1].lower() in ("list", "set")
+    rest = [a.lower() for a in args[1:]]
+    if rest in ([], ["list"]):
+        return True
+    if rest[:1] == ["set"]:
+        return len(rest) == 2 or (len(rest) == 3 and rest[2].startswith("--"))
+    return False
 
 
 class _Announcer:
