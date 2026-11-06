@@ -24,7 +24,8 @@ known-local-folder = ["fakes", "test_register"]
 minversion = "8.0"
 testpaths = ["tests"]
 pythonpath = ["tests"]
-addopts = "-m 'not live' --import-mode=importlib -p no:cacheprovider"
+addopts = "-m 'not live' --import-mode=importlib -p no:cacheprovider -p pytester"
 markers = [
     "live: reaches a real network service; deselected by default, run by hand with `pytest -m live`",
+    "real_uv: may start the real `uv` (offline env, skipped when uv is absent); nothing else",
 ]
