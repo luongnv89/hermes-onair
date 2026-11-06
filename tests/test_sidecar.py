@@ -75,6 +75,7 @@ def test_fresh_setup_creates_the_venv_and_installs_the_pin(tmp_path):
         UV, "pip", "install", "--python", f"{venv}/bin/python", *adapter.install_args(),
     ]
     assert install_call["env"]["GIT_TERMINAL_PROMPT"] == "0"
+    assert (tmp_path / "sidecar" / sidecar.MARKER).is_file()  # written after uv venv
     assert install_call["env"]["GIT_SSH_COMMAND"] == "ssh -o BatchMode=yes"
     assert install_call["stdin"] is subprocess.DEVNULL
     assert smoke_call["argv"] == adapter.smoke_argv(tmp_path / "sidecar")
@@ -101,8 +102,8 @@ def test_a_different_commit_is_reinstalled_in_the_same_venv(tmp_path):
     assert "--reinstall-package" in install
 
 
-def test_a_venv_without_python_is_recreated_with_clear(tmp_path):
-    (tmp_path / "sidecar").mkdir()
+def test_a_marked_venv_without_python_is_recreated_with_clear(tmp_path):
+    write_install(sidecar.venv_dir(tmp_path), commit=None, python=False)  # marker only
     runner = (
         FakeRunner()
         .on(is_venv, creating_venv(tmp_path))
@@ -260,3 +261,31 @@ def test_check_reports_a_failed_smoke(tmp_path):
     rc, out = run_check(tmp_path, FakeRunner().on(is_smoke, done(3)))
     assert rc == 1
     assert "smoke:   exit 3" in out
+
+
+def test_install_env_drops_paid_keys_and_engine_knobs(tmp_path):
+    write_install(sidecar.venv_dir(tmp_path), commit=None)
+    runner = FakeRunner().on(is_install, installing(tmp_path)).on(is_smoke, done(0))
+    env = {name: "secret" for name in adapter.SCRUBBED_ENV} | {"PATH": "/bin", "HOME": "/h"}
+    out, err = io.StringIO(), io.StringIO()
+    rc = sidecar.setup(tmp_path, runner=runner, which=which_uv, env=env, out=out, err=err)
+    assert rc == 0, err.getvalue()
+    install_env = runner.calls[0]["env"]
+    assert not set(install_env) & adapter.SCRUBBED_ENV
+    assert install_env["PATH"] == "/bin" and install_env["HOME"] == "/h"
+    assert "OPENROUTER_API_KEY" in adapter.SCRUBBED_ENV
+
+
+def test_install_env_scrubs_the_process_environment_by_default(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-not-a-key")
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "x")
+    env = sidecar._install_env()
+    assert "OPENROUTER_API_KEY" not in env and "ELEVENLABS_API_KEY" not in env
+
+
+def test_smoke_goes_through_the_adapter(tmp_path, monkeypatch):
+    write_install(sidecar.venv_dir(tmp_path))
+    seen = []
+    monkeypatch.setattr(adapter, "smoke", lambda venv, runner: seen.append(venv) or (True, "ok"))
+    state = sidecar.inspect(tmp_path, FakeRunner())  # the runner itself is never called
+    assert state.ok and seen == [tmp_path / "sidecar"]

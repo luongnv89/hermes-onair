@@ -14,8 +14,16 @@ PINNED_SHA = adapter.DROPCAST_PIN + "ab1cb34d54913285597309403b892fe8b"
 OTHER_SHA = "0123456789abcdef0123456789abcdef01234567"
 
 
-def write_install(venv: Path, commit: str | None = PINNED_SHA, *, python: bool = True) -> None:
-    """Lay out a sidecar venv the way uv leaves it after a git install."""
+def write_install(
+    venv: Path, commit: str | None = PINNED_SHA, *, python: bool = True, marker: bool = True
+) -> None:
+    """Lay out a sidecar venv the way uv leaves it after a git install.
+
+    ``marker`` adds the ``.onair-sidecar`` file setup writes after creating a venv.
+    """
+    venv.mkdir(parents=True, exist_ok=True)
+    if marker:
+        (venv / ".onair-sidecar").write_text("Created by the hermes-onair plugin.\n")
     if python:
         (venv / "bin").mkdir(parents=True, exist_ok=True)
         (venv / "bin" / "python").write_text("")

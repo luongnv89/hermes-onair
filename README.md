@@ -34,6 +34,16 @@ hermes onair setup --check   # report the sidecar's state; exit 0 when ready
   left alone, and one at another commit is reinstalled.
 - When uv is missing or the repository cannot be fetched, setup says so and
   exits non-zero.
+- Setup only writes to its own sidecar: a real directory (not a symlink)
+  directly inside the data dir, marked with `.onair-sidecar` right after uv
+  creates it. Only a marked venv is ever recreated (`uv venv --clear`).
+  Anything else at that path is left untouched, and setup asks you to move it
+  aside. Setup never deletes anything itself.
+- A sidecar made by v0.1.0 has no marker. Setup adopts it, by writing the
+  marker, only when its venv records a DropCast install from the DropCast
+  repository (PEP 610 `direct_url.json`). `--check` never writes; it reports
+  such a sidecar as adoptable. A v0.1.0 venv whose install never completed
+  can't be told apart from a foreign one, so move it aside and run setup again.
 
 Settings (`plugins.entries.onair.settings` in `config.yaml`):
 
@@ -48,10 +58,12 @@ Settings (`plugins.entries.onair.settings` in `config.yaml`):
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements-dev.txt
 ruff check .
-pytest -q            # offline: network and subprocesses are blocked
+pytest -q            # offline: network, DNS and new processes are blocked
 pytest -m live       # by hand only: tests that reach real services
 ```
 
+- Tests marked `real_uv` may start the real `uv` (only it), offline, and are
+  skipped when uv is absent.
 - Read `AGENTS.md` first: its hard rules (free engines only, the key only from
   the environment, edge-tts output for private use, DropCast only through
   `adapter.py`, an offline test run) override everything else.

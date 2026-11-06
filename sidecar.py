@@ -1,9 +1,25 @@
 """The sidecar venv behind ``hermes onair setup``.
 
 The sidecar is a uv-made virtualenv at ``<plugin data dir>/sidecar`` holding
-the pinned engine package. This module only runs uv and the commands
-``adapter`` hands it; what to install and how to tell it is right is
-``adapter``'s business (AGENTS.md rule 4).
+the pinned engine package. This module runs uv itself (``uv venv`` and
+``uv pip install``, with the install arguments ``adapter`` supplies) and asks
+``adapter`` everything engine-specific: what to install, which commit is
+installed, and whether the engine starts (AGENTS.md rule 4).
+
+Setup only ever writes to a sidecar it owns:
+
+- the path must be a real directory directly inside the data dir, never a
+  symbolic link or anything that resolves elsewhere;
+- an existing directory must hold the ``.onair-sidecar`` marker, written right
+  after uv creates the venv. Only a marked venv is ever recreated with
+  ``uv venv --clear``;
+- a sidecar from before the marker existed (v0.1.0) is adopted, by writing
+  the marker, only when its venv has a Python and a PEP 610 record of an
+  install from the engine's own repository (``adapter.installed_commit``).
+  ``--check`` never writes; it reports such a sidecar as adoptable.
+
+Anything else at that path is refused with a message asking the user to
+move it aside. This module never deletes anything itself.
 
 Every process goes through an injected ``runner`` (``subprocess.run`` by
 default) and uv is found through an injected ``which``, so tests never spawn
@@ -25,12 +41,25 @@ from typing import TextIO
 from . import adapter
 
 VENV_DIRNAME = "sidecar"
+MARKER = ".onair-sidecar"
 DEFAULT_UV_BIN = ""
 DEFAULT_SIDECAR_PYTHON = ">=3.11"
 
 VENV_TIMEOUT_S = 300
 INSTALL_TIMEOUT_S = 900
-SMOKE_TIMEOUT_S = 60
+
+# Who owns what sits at the sidecar path.
+ABSENT = "absent"
+OWNED = "owned"  # holds the marker
+ADOPTABLE = "adoptable"  # pre-marker sidecar: a venv with the engine's PEP 610 record
+FOREIGN = "foreign"  # anything else: never written to
+
+_OWNER_TEXT = {
+    ABSENT: "none yet",
+    OWNED: f"On Air ({MARKER} present)",
+    ADOPTABLE: f"On Air, from before {MARKER} (setup adopts it)",
+    FOREIGN: f"not On Air (no {MARKER}); setup will not touch it",
+}
 
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 Which = Callable[[str], "str | None"]
@@ -47,9 +76,11 @@ _REPO_UNAVAILABLE = re.compile(
 
 @dataclass(frozen=True)
 class SidecarState:
-    """What is on disk, and whether it is the pinned, working install."""
+    """What is on disk, who owns it, and whether it is the pinned, working install."""
 
     venv: Path
+    problem: str | None
+    owner: str
     python_ok: bool
     commit: str | None
     pin_ok: bool
@@ -58,7 +89,13 @@ class SidecarState:
 
     @property
     def ok(self) -> bool:
-        return self.python_ok and self.pin_ok and self.smoke_ok
+        return (
+            self.problem is None
+            and self.owner in (OWNED, ADOPTABLE)
+            and self.python_ok
+            and self.pin_ok
+            and self.smoke_ok
+        )
 
 
 def venv_dir(data_dir: Path) -> Path:
@@ -67,6 +104,39 @@ def venv_dir(data_dir: Path) -> Path:
 
 def venv_python(venv: Path) -> Path:
     return Path(venv) / "bin" / "python"
+
+
+def path_problem(data_dir: Path, venv: Path) -> str | None:
+    """Why *venv* is not a safe place to create or clear a venv, or None."""
+    if venv.is_symlink():
+        return "it is a symbolic link"
+    try:
+        inside = venv.resolve().parent == Path(data_dir).resolve()
+    except (OSError, RuntimeError) as exc:
+        return f"it cannot be resolved ({exc})"
+    return None if inside else "it resolves outside the plugin data dir"
+
+
+def ownership(venv: Path) -> str:
+    """ABSENT, OWNED, ADOPTABLE or FOREIGN. Reads only."""
+    if not venv.exists() and not venv.is_symlink():
+        return ABSENT
+    if not venv.is_dir():
+        return FOREIGN
+    marker = venv / MARKER
+    if marker.is_file() and not marker.is_symlink():
+        return OWNED
+    if venv_python(venv).is_file() and adapter.installed_commit(venv) is not None:
+        return ADOPTABLE
+    return FOREIGN
+
+
+def write_marker(venv: Path) -> None:
+    """Mark *venv* as On Air's own; never follows a symlink planted at the marker."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(venv / MARKER, flags, 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write("Created by the hermes-onair plugin (`hermes onair setup`).\n")
 
 
 def find_uv(configured: str = DEFAULT_UV_BIN, which: Which = shutil.which) -> str | None:
@@ -84,42 +154,58 @@ def _tail(text: str | None, lines: int = 5) -> str:
     return "\n".join(f"    {line}" for line in kept)
 
 
-def _run(runner: Runner, argv: list[str], timeout: int, env: Mapping[str, str] | None = None):
+def _run(runner: Runner, argv: list[str], timeout: int, env: Mapping[str, str]):
     return runner(
         argv,
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         timeout=timeout,
-        env=dict(env) if env is not None else None,
+        env=dict(env),
         check=False,
     )
 
 
 def _install_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
-    """Never prompt: a missing key or unknown host fails instead of hanging."""
-    env = dict(os.environ if base is None else base)
+    """uv's environment: no paid keys or engine knobs, and never a prompt.
+
+    A missing key or unknown host fails instead of hanging.
+    """
+    source = os.environ if base is None else base
+    env = {k: v for k, v in source.items() if k not in adapter.SCRUBBED_ENV}
     env["GIT_TERMINAL_PROMPT"] = "0"
     env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
     return env
 
 
 def inspect(data_dir: Path, runner: Runner = subprocess.run) -> SidecarState:
-    """Read the sidecar's state. Runs only the sidecar's own smoke command."""
+    """Read the sidecar's state; never writes. Starts only the engine's smoke check,
+    and only in a venv that is safely placed and On Air's own."""
     venv = venv_dir(data_dir)
+    problem = path_problem(data_dir, venv)
+    owner = ownership(venv)
     python_ok = venv_python(venv).is_file()
     commit = adapter.installed_commit(venv) if python_ok else None
     pin_ok = adapter.pin_matches(commit)
     smoke_ok, detail = False, "skipped"
-    if python_ok and pin_ok:
-        try:
-            proc = _run(runner, adapter.smoke_argv(venv), SMOKE_TIMEOUT_S, adapter.child_env())
-        except (OSError, subprocess.SubprocessError) as exc:
-            detail = f"could not start: {exc.__class__.__name__}"
-        else:
-            smoke_ok = proc.returncode == 0
-            detail = "ok" if smoke_ok else f"exit {proc.returncode}"
-    return SidecarState(venv, python_ok, commit, pin_ok, smoke_ok, detail)
+    if python_ok and pin_ok and problem is None and owner in (OWNED, ADOPTABLE):
+        smoke_ok, detail = adapter.smoke(venv, runner)
+    return SidecarState(venv, problem, owner, python_ok, commit, pin_ok, smoke_ok, detail)
+
+
+def _refuse(venv: Path, why: str, err: TextIO) -> int:
+    print(f"✗ Not touching {venv}: {why}.", file=err)
+    print(
+        "  On Air only creates, repairs or clears its own sidecar: a real directory "
+        f"inside its data dir, marked with {MARKER}.",
+        file=err,
+    )
+    print(
+        f"  Move it aside (for example `mv {venv} {venv}.old`), then run "
+        "`hermes onair setup` again.",
+        file=err,
+    )
+    return 1
 
 
 def setup(
@@ -135,15 +221,30 @@ def setup(
 ) -> int:
     """Create or repair the sidecar. Idempotent: a good install is left alone.
 
-    Returns 0 when the sidecar is ready, 1 when uv failed, 2 when uv is missing.
+    Returns 0 when the sidecar is ready, 1 when the path is not On Air's to
+    write or uv failed, 2 when uv is missing.
     """
     out = out or sys.stdout
     err = err or sys.stderr
     name = adapter.NAME
     state = inspect(data_dir, runner)
+    venv = state.venv
+    if state.problem:
+        return _refuse(venv, state.problem, err)
+    if state.owner == FOREIGN:
+        return _refuse(venv, f"it was not created by On Air (no {MARKER})", err)
+
+    try:
+        if state.owner == ADOPTABLE:
+            write_marker(venv)
+            print(f"● Adopted the existing sidecar at {venv} (wrote {MARKER})", file=out)
+    except OSError as exc:
+        print(f"✗ could not mark {venv} as On Air's: {exc.strerror or exc}", file=err)
+        return 1
+
     if state.ok:
         print(f"✓ On Air sidecar already set up ({name} {state.commit[:12]})", file=out)
-        print(f"  venv: {state.venv}", file=out)
+        print(f"  venv: {venv}", file=out)
         return 0
 
     uv = find_uv(uv_bin, which)
@@ -157,11 +258,10 @@ def setup(
         )
         return 2
 
-    venv = state.venv
     if not state.python_ok:
         Path(data_dir).mkdir(parents=True, exist_ok=True)
         argv = [uv, "venv", "--python", python_request or DEFAULT_SIDECAR_PYTHON]
-        if venv.exists():
+        if state.owner == OWNED:  # never --clear a directory On Air did not create
             argv.append("--clear")
         argv.append(str(venv))
         print(f"● Creating the sidecar venv at {venv}", file=out)
@@ -176,6 +276,11 @@ def setup(
         if proc.returncode != 0:
             print(f"✗ uv could not create the sidecar venv (exit {proc.returncode}):", file=err)
             print(_tail(proc.stderr), file=err)
+            return 1
+        try:
+            write_marker(venv)
+        except OSError as exc:
+            print(f"✗ could not mark {venv} as On Air's: {exc.strerror or exc}", file=err)
             return 1
 
     spec = adapter.install_spec()
@@ -215,6 +320,9 @@ def setup(
 def _report(state: SidecarState, out: TextIO) -> None:
     name = adapter.NAME
     print(f"  venv:    {state.venv} ({'present' if state.venv.exists() else 'missing'})", file=out)
+    if state.problem:
+        print(f"  path:    UNSAFE: {state.problem}", file=out)
+    print(f"  owner:   {_OWNER_TEXT[state.owner]}", file=out)
     print(f"  python:  {'ok' if state.python_ok else 'missing'}", file=out)
     if state.commit is None:
         print(f"  {name}: not installed from a pinned commit", file=out)
@@ -242,5 +350,8 @@ def check(
     if state.ok:
         print("Result: OK", file=out)
         return 0
-    print("Result: NOT READY (run `hermes onair setup`)", file=out)
+    if state.problem or state.owner == FOREIGN:
+        print("Result: NOT READY (move the path aside, then run `hermes onair setup`)", file=out)
+    else:
+        print("Result: NOT READY (run `hermes onair setup`)", file=out)
     return 1
