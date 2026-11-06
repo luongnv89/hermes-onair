@@ -179,8 +179,40 @@ def pinned_voice(voice: Any) -> tuple[str, str] | None:
     return (engine, name) if sep and engine in ENGINES and name else None
 
 
+def _ffmpeg_version(directory: Path) -> tuple[int, ...]:
+    """``(10, 0, 1)`` from ``ffmpeg-10.0.1-linux-x64``; ``()`` when there is no version."""
+    match = re.match(r"ffmpeg-(\d+(?:\.\d+)*)", directory.name)
+    return tuple(int(part) for part in match.group(1).split(".")) if match else ()
+
+
+def managed_ffmpeg(
+    home: Path | None = None, environ: Mapping[str, str] | None = None
+) -> str | None:
+    """Hermes's managed ffmpeg: newest ``tools/ffmpeg-*/bin/ffmpeg``.
+
+    ``$HERMES_HOME/tools`` first when set, then ``~/.hermes/tools``; within a
+    folder the highest version wins (by number, so 10.x beats 9.x).
+    """
+    env = os.environ if environ is None else environ
+    roots = []
+    hermes_home = (env.get("HERMES_HOME") or "").strip()
+    if hermes_home:
+        roots.append(Path(hermes_home).expanduser() / "tools")
+    roots.append((home or Path.home()) / ".hermes" / "tools")
+    for tools in roots:
+        dirs = sorted(tools.glob("ffmpeg-*"), key=_ffmpeg_version, reverse=True)
+        for directory in dirs:
+            candidate = directory / "bin" / "ffmpeg"
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+    return None
+
+
 def find_ffmpeg(
-    configured: Any = DEFAULT_FFMPEG_BIN, which: Which = shutil.which, home: Path | None = None
+    configured: Any = DEFAULT_FFMPEG_BIN,
+    which: Which = shutil.which,
+    home: Path | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> str | None:
     """ffmpeg: the ``ffmpeg_bin`` setting, else PATH, else Hermes's managed copy.
 
@@ -193,14 +225,7 @@ def find_ffmpeg(
             path = Path(os.path.abspath(os.path.expanduser(value)))  # "./ffmpeg" stays a path
             return str(path) if path.is_file() and os.access(path, os.X_OK) else None
         return which(value)
-    found = which("ffmpeg")
-    if found:
-        return found
-    tools = (home or Path.home()) / ".hermes" / "tools"
-    for candidate in sorted(tools.glob("ffmpeg-*/bin/ffmpeg"), reverse=True):
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return str(candidate)
-    return None
+    return which("ffmpeg") or managed_ffmpeg(home, environ)
 
 
 # ------------------------------------------------------------------- engines

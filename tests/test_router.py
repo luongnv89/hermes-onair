@@ -503,7 +503,8 @@ def test_find_ffmpeg_prefers_the_setting(tmp_path):
     assert router.find_ffmpeg("ff", which=lambda n: f"/bin/{n}") == "/bin/ff"
 
 
-def test_find_ffmpeg_falls_back_to_path_then_hermes_tools(tmp_path):
+def test_find_ffmpeg_falls_back_to_path_then_hermes_tools(tmp_path, monkeypatch):
+    monkeypatch.delenv("HERMES_HOME", raising=False)
     assert router.find_ffmpeg("", which=lambda n: "/usr/bin/ffmpeg") == "/usr/bin/ffmpeg"
     managed = tmp_path / ".hermes" / "tools" / "ffmpeg-9.0.1-linux-x64" / "bin" / "ffmpeg"
     managed.parent.mkdir(parents=True)
@@ -735,3 +736,49 @@ def test_ffmpeg_bin_with_a_tilde_or_separator_is_a_path(tmp_path, monkeypatch):
     assert router.find_ffmpeg(str(tmp_path / "missing" / "ffmpeg"), which=never) is None
     exe.chmod(0o644)
     assert router.find_ffmpeg(str(exe), which=never) is None  # not executable
+
+
+# ------------------------------- review r1, N4: managed ffmpeg lookup order
+
+
+def tool(root, name):
+    exe = root / name / "bin" / "ffmpeg"
+    exe.parent.mkdir(parents=True)
+    exe.write_text("")
+    exe.chmod(0o755)
+    return str(exe)
+
+
+def test_the_newest_managed_ffmpeg_wins_by_version_not_by_name(tmp_path):
+    tools = tmp_path / ".hermes" / "tools"
+    tool(tools, "ffmpeg-9.0.1-linux-x64")
+    ten = tool(tools, "ffmpeg-10.0-linux-x64")
+    tool(tools, "ffmpeg-custom")
+    tool(tools, "ffmpeg-9.10-linux-x64")
+    assert router.managed_ffmpeg(home=tmp_path, environ={}) == ten
+    assert router.find_ffmpeg("", which=lambda n: None, home=tmp_path, environ={}) == ten
+
+
+def test_hermes_home_tools_come_before_the_default_root(tmp_path):
+    tool(tmp_path / "home" / ".hermes" / "tools", "ffmpeg-10.0-linux-x64")
+    custom = tool(tmp_path / "hermes-root" / "tools", "ffmpeg-8.1-linux-x64")
+    environ = {"HERMES_HOME": str(tmp_path / "hermes-root")}
+    assert router.managed_ffmpeg(home=tmp_path / "home", environ=environ) == custom
+    # An empty HERMES_HOME tools dir falls back to ~/.hermes/tools.
+    environ = {"HERMES_HOME": str(tmp_path / "empty")}
+    assert router.managed_ffmpeg(home=tmp_path / "home", environ=environ).endswith(
+        "ffmpeg-10.0-linux-x64/bin/ffmpeg"
+    )
+
+
+def test_a_non_executable_managed_ffmpeg_is_skipped(tmp_path):
+    tools = tmp_path / ".hermes" / "tools"
+    nine = tool(tools, "ffmpeg-9.0.1-linux-x64")
+    Path(tool(tools, "ffmpeg-10.0-linux-x64")).chmod(0o644)
+    assert router.managed_ffmpeg(home=tmp_path, environ={}) == nine
+
+
+def test_ffmpeg_version_parsing():
+    assert router._ffmpeg_version(Path("ffmpeg-10.0.1-linux-x64")) == (10, 0, 1)
+    assert router._ffmpeg_version(Path("ffmpeg-9.0.1-linux-x64")) == (9, 0, 1)
+    assert router._ffmpeg_version(Path("ffmpeg-custom")) == ()
