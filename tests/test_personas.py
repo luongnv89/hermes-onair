@@ -198,7 +198,7 @@ def racing(monkeypatch, names, *, lock: bool):
     monkeypatch.setattr(personas, "held_by_siblings", slow_scan)
     if not lock:
         monkeypatch.setattr(personas, "root_lock",
-                            lambda home, timeout=0: contextlib.nullcontext(False))
+                            lambda home, timeout=0: contextlib.nullcontext(personas.NO_LOCK))
 
 
 def run_together(root, names):
@@ -242,11 +242,13 @@ def test_without_the_lock_the_same_race_collides(tmp_path, monkeypatch):
 def test_the_root_lock_excludes_a_second_holder(tmp_path):
     root = make_root(tmp_path, ("forge", "mail"))
     with personas.root_lock(home_of(root, "forge")) as held:
-        assert held is True
+        assert held == personas.LOCKED
         with personas.root_lock(home_of(root, "mail"), timeout=0.2) as second:
-            assert second is False  # same root: timed out, goes on unlocked
+            assert second == personas.TIMED_OUT  # same root: someone else holds it
     with personas.root_lock(home_of(root, "mail"), timeout=0.2) as again:
-        assert again is True
+        assert again == personas.LOCKED
+    with personas.root_lock(None) as none:
+        assert none == personas.NO_LOCK
     assert sorted(p.name for p in root.iterdir()) == ["profiles"]  # no lock file written
 
 
@@ -478,3 +480,31 @@ def test_a_copied_claim_is_not_listed_as_this_profiles(tmp_path):
         (data_of(root, "forge") / "persona.json").read_bytes())
     held = personas.all_claims(home_of(root, "forge2"), data_of(root, "forge2"), "forge2")
     assert held == {source: ["forge"]}
+
+
+# ------------------------------------------------- review r1, nit 1: lock timeout
+
+
+def test_a_lock_timeout_speaks_unstored_and_the_next_call_claims(tmp_path, monkeypatch,
+                                                                caplog):
+    root = make_root(tmp_path, ("forge", "mail"))
+    caplog.set_level("WARNING", logger="onair")
+    real = personas.root_lock
+    monkeypatch.setattr(personas, "root_lock", lambda home, timeout=0: real(home, 0.1))
+    with real(home_of(root, "mail")) as held:  # another claim holds the root's lock
+        assert held == personas.LOCKED
+        got = claim(root, "forge")
+    assert got.status == "unstored"
+    assert not (data_of(root, "forge") / "persona.json").exists()  # nothing written
+    assert "lock timed out; speaking as" in caplog.text and "not stored" in caplog.text
+    again = claim(root, "forge")  # the lock is free now
+    assert again.status == "claimed" and stored(root, "forge") == again.persona.id
+
+
+@pytest.mark.parametrize("state", [personas.NO_LOCK, personas.LOCKED])
+def test_a_claim_is_stored_when_no_lock_can_exist_or_it_is_held(tmp_path, monkeypatch, state):
+    root = make_root(tmp_path, ("forge",))
+    monkeypatch.setattr(personas, "root_lock",
+                        lambda home, timeout=0: contextlib.nullcontext(state))
+    assert claim(root, "forge").status == "claimed"
+    assert (data_of(root, "forge") / "persona.json").is_file()

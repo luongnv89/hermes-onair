@@ -43,9 +43,12 @@ No other profile's file is ever written.
 **Races.** Two profiles claiming at once would both see the same free
 persona. A claim therefore runs under an exclusive ``flock`` on the root
 *directory* (no lock file is written anywhere). Inside the lock the profile
-re-reads its own claim, scans, and writes. Without ``fcntl``, or if the lock
-cannot be had within :data:`LOCK_TIMEOUT_S`, the claim goes ahead unlocked
-and says so in the log.
+re-reads its own claim, scans, and writes. If the lock cannot be had within
+:data:`LOCK_TIMEOUT_S`, the probed persona is used for this call only and
+**not stored** (``status="unstored"``, with a warning), so the next call
+claims again under the lock and an unlocked race can never write a
+duplicate for good. Where no lock can exist at all (no ``fcntl``, no root
+to open), the claim is stored unlocked and the log says so.
 
 Once every persona is held, a new profile takes the least-shared one in its
 probe order: with 10 personas, an 11th profile shares a voice.
@@ -330,16 +333,21 @@ def all_claims(home: Path | None, data_dir: Path, profile: str) -> dict[str, lis
     return held
 
 
-@contextlib.contextmanager
-def root_lock(home: Path | None, timeout: float = LOCK_TIMEOUT_S) -> Iterator[bool]:
-    """Hold an exclusive ``flock`` on *home*'s root directory; yields whether it is held.
+LOCKED = "locked"
+NO_LOCK = "none"  # no lock can exist here: no fcntl, no home, no root to open, flock refused
+TIMED_OUT = "timeout"  # another holder kept the lock past the timeout
 
-    Nothing is written: the lock is on the directory itself. Without fcntl, a
-    root that cannot be opened, or after *timeout*, it yields False and the
-    caller goes on unlocked.
+
+@contextlib.contextmanager
+def root_lock(home: Path | None, timeout: float = LOCK_TIMEOUT_S) -> Iterator[str]:
+    """Hold an exclusive ``flock`` on *home*'s root directory.
+
+    Yields :data:`LOCKED`, :data:`TIMED_OUT` (held by someone else past
+    *timeout*) or :data:`NO_LOCK` (no lock is possible here). Nothing is
+    written: the lock is on the directory itself.
     """
     if fcntl is None or home is None:
-        yield False
+        yield NO_LOCK
         return
     root = root_of(home)
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
@@ -347,28 +355,28 @@ def root_lock(home: Path | None, timeout: float = LOCK_TIMEOUT_S) -> Iterator[bo
         fd = os.open(root, flags)
     except OSError as exc:
         log.warning("persona claim without a lock: cannot open %s (%s)", root, exc.strerror)
-        yield False
+        yield NO_LOCK
         return
-    locked = False
+    state = NO_LOCK
     try:
         deadline = time.monotonic() + timeout
         while True:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                locked = True
+                state = LOCKED
                 break
             except BlockingIOError:
                 if time.monotonic() >= deadline:
-                    log.warning("persona claim without a lock: %s stayed locked %.1f s",
-                                root, timeout)
+                    log.warning("persona claim lock: %s stayed locked %.1f s", root, timeout)
+                    state = TIMED_OUT
                     break
                 time.sleep(_LOCK_POLL_S)
             except OSError as exc:
                 log.warning("persona claim without a lock: flock failed (%s)", exc.strerror)
                 break
-        yield locked
+        yield state
     finally:
-        if locked:
+        if state == LOCKED:
             with contextlib.suppress(OSError):
                 fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
@@ -423,7 +431,7 @@ def claim(data_dir: Path, profile: str, home: Path | None) -> Claim:
     record = read_record(path)
     if record is not None and _owned(record, profile):
         return _stored(profile, path, record)
-    with root_lock(home):
+    with root_lock(home) as lock:
         record = read_record(path)  # another process of this profile may have won
         if record is not None and _owned(record, profile):
             return _stored(profile, path, record)
@@ -436,6 +444,10 @@ def claim(data_dir: Path, profile: str, home: Path | None) -> Claim:
                          " claiming a new one", profile, record.get("profile"),
                          record["persona"], ", ".join(held[record["persona"]]))
             persona, how = probe(profile, held), "first-use"
+        if lock == TIMED_OUT:  # a racing claim may be mid-write: never store a guess
+            log.warning("profile %s: persona claim lock timed out; speaking as %s for this "
+                        "call only, not stored (the next call claims again)", profile, persona.id)
+            return Claim(profile, persona, path, "unstored")
         new = _record(profile, persona, how)
         try:
             write_record(path, new)
