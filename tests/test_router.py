@@ -684,3 +684,25 @@ def test_delivery_goes_through_a_temp_file_and_replace(tmp_path, data_dir, monke
     ((src, dst),) = seen
     assert dst == out and src.parent == out.parent and src.name.endswith(".part")
     assert [p.name for p in out.parent.iterdir()] == [out.name]
+
+
+# ------------------------------------------- review r1, N2: ffmpeg's env
+
+
+def test_ffmpeg_runs_without_the_key(tmp_path, data_dir, key, monkeypatch):
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "another-paid-key")
+    monkeypatch.setenv("ONAIR_TEST_KEEP", "kept")
+    http = FakeHttp(speech={FISH: status(500), HEYGEN: audio(PCM_BYTES, "audio/pcm")})
+    run = runner()
+    assert speak(tmp_path, environment(data_dir, http, run), fmt="wav")[0] == "heygen"
+    (call,) = run.calls
+    child = call["env"]
+    assert "OPENROUTER_API_KEY" not in child and "ELEVENLABS_API_KEY" not in child
+    assert KEY not in repr(child)
+    assert child["ONAIR_TEST_KEEP"] == "kept" and child.get("PATH") == os.environ.get("PATH")
+
+
+def test_ffmpeg_env_scrubs_an_injected_environment():
+    child = router.ffmpeg_env({"OPENROUTER_API_KEY": KEY, "PATH": "/bin", "LANG": "C"})
+    assert child == {"PATH": "/bin", "LANG": "C"}
+    assert "OPENROUTER_API_KEY" in adapter.SCRUBBED_ENV

@@ -218,6 +218,16 @@ class Environment:
             self.catalog = openrouter.Catalog(self.data_dir, http=self.http)
 
 
+def ffmpeg_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """ffmpeg's environment: ours without the key and the other paid-service names.
+
+    Reuses the adapter's scrub list (``adapter.SCRUBBED_ENV``), which holds
+    ``OPENROUTER_API_KEY``; ffmpeg needs none of them (rule 2, defence in depth).
+    """
+    source = os.environ if base is None else base
+    return {k: v for k, v in source.items() if k not in adapter.SCRUBBED_ENV}
+
+
 def _ffmpeg(env: Environment, args: list[str], out: Path) -> None:
     if not env.ffmpeg:
         raise EngineError("ffmpeg not found")
@@ -225,7 +235,7 @@ def _ffmpeg(env: Environment, args: list[str], out: Path) -> None:
     try:
         proc = env.runner(
             argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
-            timeout=FFMPEG_TIMEOUT_S, check=False,
+            timeout=FFMPEG_TIMEOUT_S, check=False, env=ffmpeg_env(env.environ),
         )
     except subprocess.TimeoutExpired:
         raise EngineError(f"ffmpeg did not finish within {FFMPEG_TIMEOUT_S} s") from None
