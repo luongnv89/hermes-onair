@@ -306,23 +306,30 @@ def inspect_record(path: Path) -> tuple[dict[str, Any] | None, str | None]:
 
 
 def held_by_siblings(home: Path | None) -> dict[str, list[str]]:
-    """persona id -> the sibling profiles holding it (their claim files, read-only)."""
+    """persona id -> the sibling profiles holding it (their claim files, read-only).
+
+    A ``profiles/<name>`` sibling whose record names another profile holds
+    nothing: it is a copy no one has adopted yet (a ``--clone-all`` clone or a
+    renamed profile that has not spoken since). The source of a clone still
+    holds the persona through its own record, so the clone claims a new one;
+    a renamed profile adopts its persona when it next speaks. The root's
+    record is always counted, under its recorded name.
+    """
     held: dict[str, list[str]] = {}
     root = root_of(home) if home is not None else None
     for sibling in sibling_homes(home):
         record = read_record(claim_path_of(sibling))
         if record is None:
             continue
+        is_root = root is not None and _same(sibling, root)
+        if not is_root and not _owned(record, sibling.name):
+            continue  # an un-adopted copy
         held.setdefault(record["persona"], []).append(_label_of(sibling, root, record))
     return held
 
 
 def _label_of(sibling: Path, root: Path | None, record: Mapping[str, Any]) -> str:
-    """A sibling's name: its ``profiles/<name>`` directory, else the root's recorded name.
-
-    The directory wins over the record's ``profile`` field, which a copied
-    file (``hermes profile create --clone-all``) carries from its source.
-    """
+    """A sibling's name: its ``profiles/<name>`` directory, else the root's recorded name."""
     if root is None or not _same(sibling, root):
         return sibling.name
     name = record.get("profile")

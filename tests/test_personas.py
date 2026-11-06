@@ -481,9 +481,8 @@ def test_a_cloned_profile_claims_its_own_persona(tmp_path):
     claim(root, "mail")
     copied = (data_of(root, "forge") / "persona.json").read_bytes()
     (data_of(root, "forge2") / "persona.json").write_bytes(copied)
-    # Until forge2 speaks, its copy still counts (labelled by directory, not by the
-    # record): a persona that may be in use is never handed to a third profile.
-    assert personas.held_by_siblings(home_of(root, "mail"))[source] == ["forge", "forge2"]
+    # forge2's copy names forge, not forge2: an un-adopted copy holds nothing.
+    assert personas.held_by_siblings(home_of(root, "mail"))[source] == ["forge"]
     got = claim(root, "forge2")
     assert got.status == "claimed" and got.persona.id not in (source, stored(root, "mail"))
     record = json.loads((data_of(root, "forge2") / "persona.json").read_text())
@@ -540,3 +539,53 @@ def test_a_claim_is_stored_when_no_lock_can_exist_or_it_is_held(tmp_path, monkey
                         lambda home, timeout=0: contextlib.nullcontext(state))
     assert claim(root, "forge").status == "claimed"
     assert (data_of(root, "forge") / "persona.json").is_file()
+
+
+# ------------------------------------- review r1, nit 3: un-adopted copies hold nothing
+
+
+def clone(root, source, target):
+    """What `hermes profile create <target> --clone-all` does to the claim file."""
+    data_of(root, target).mkdir(parents=True, exist_ok=True)
+    (data_of(root, target) / "persona.json").write_bytes(
+        (data_of(root, source) / "persona.json").read_bytes())
+
+
+def test_a_rename_with_an_unspoken_clone_keeps_the_voice(tmp_path):
+    root = make_root(tmp_path, ("forge", "mail"))
+    voice = claim(root, "forge").persona
+    claim(root, "mail")
+    clone(root, "forge", "forgeclone")  # not spoken yet
+    (root / "profiles" / "forge").rename(root / "profiles" / "anvil")
+    renamed = claim(root, "anvil")
+    assert renamed.persona is voice and renamed.how == "adopted"
+    cloned = claim(root, "forgeclone")  # the clone speaks later: anvil holds the voice now
+    assert cloned.persona is not voice and cloned.how == "first-use"
+    assert len({voice.id, cloned.persona.id, stored(root, "mail")}) == 3
+
+
+def test_a_clone_still_claims_its_own_persona(tmp_path):
+    root = make_root(tmp_path, ("forge", "mail"))
+    voice = claim(root, "forge").persona
+    clone(root, "forge", "forgeclone")
+    got = claim(root, "forgeclone")
+    assert got.persona is not voice and stored(root, "forge") == voice.id
+
+
+def test_an_unspoken_clone_neither_blocks_set_nor_shows_in_the_list(tmp_path):
+    root = make_root(tmp_path, ("forge", "mail"))
+    voice = claim(root, "forge").persona
+    claim(root, "mail")
+    clone(root, "mail", "mailclone")  # a copy of mail's claim, not spoken yet
+    mails = stored(root, "mail")
+    held = personas.all_claims(home_of(root, "forge"), data_of(root, "forge"), "forge")
+    assert held == {voice.id: ["forge"], mails: ["mail"]}
+    with pytest.raises(personas.ClaimRefused, match=r"claimed by mail;"):
+        personas.set_claim(data_of(root, "forge"), "forge", home_of(root, "forge"), mails)
+
+
+def test_the_roots_record_always_counts(tmp_path):
+    root = make_root(tmp_path, ("default", "forge"))
+    personas.write_record(data_of(root, "default") / "persona.json",
+                          {"persona": "theo", "profile": "onair-root"})
+    assert personas.held_by_siblings(home_of(root, "forge")) == {"theo": ["onair-root"]}
