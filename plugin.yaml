@@ -1,9 +1,11 @@
 name: onair
 version: 0.1.0
 description: >-
-  On Air: free voices and two-host audio shows for Hermes agents. This
-  release adds `hermes onair setup`, which installs the pinned DropCast
-  sidecar into the plugin's data dir with uv.
+  On Air: free voices and two-host audio shows for Hermes agents. Set
+  `tts.provider: onair` to speak with free voices only: OpenRouter's free
+  Fish and HeyGen models (price-checked before every call), then edge-tts
+  for private use. `hermes onair setup` installs the pinned DropCast
+  sidecar that renders edge-tts.
 author: Luong NGUYEN
 license: MIT
 manifest_version: 2
@@ -14,8 +16,9 @@ tags: [tts, voice, podcast]
 # The host side is stdlib-only. DropCast runs in its own uv venv
 # (`hermes onair setup`), so Hermes installs nothing for this plugin.
 python_runtime: external
-# register() registers only the `hermes onair` CLI command, for which Hermes
-# has no provides_* key: no tools, no hooks.
+# register() registers the `hermes onair` CLI command and the `onair` TTS
+# provider (ctx.register_tts_provider). Hermes has no provides_* key for
+# either: no tools, no hooks.
 provides_tools: []
 provides_hooks: []
 config_schema:
@@ -27,3 +30,24 @@ config_schema:
     type: str
     default: ">=3.11"
     description: Python request passed to `uv venv --python` for the sidecar venv.
+  ffmpeg_bin:
+    type: str
+    default: ""
+    description: >-
+      Path or name of ffmpeg, used to convert HeyGen's raw PCM and to make
+      non-MP3 formats; empty looks on PATH, then in Hermes's managed tools
+      (~/.hermes/tools/ffmpeg-*/bin/ffmpeg). Without ffmpeg, HeyGen is skipped.
+  language:
+    type: str
+    default: auto
+    description: >-
+      Language of the spoken text (a BCP 47 tag such as en, fr, vi), or auto
+      to detect en/fr/vi from the text. English uses Fish, then HeyGen, then
+      edge-tts; other languages HeyGen, then Fish, then edge-tts.
+  voices:
+    type: dict
+    default: {}
+    description: >-
+      Voice overrides per engine and language, e.g.
+      {edge: {fr: fr-FR-HenriNeural}, heygen: {"*": tabitha}}; "*" is any
+      other language. Unset entries use the built-in defaults.
