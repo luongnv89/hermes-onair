@@ -15,13 +15,22 @@ OTHER_SHA = "0123456789abcdef0123456789abcdef01234567"
 
 
 def write_install(
-    venv: Path, commit: str | None = PINNED_SHA, *, python: bool = True, marker: bool = True
+    venv: Path,
+    commit: str | None = PINNED_SHA,
+    *,
+    python: bool = True,
+    marker: bool = True,
+    uv_made: bool = True,
 ) -> None:
     """Lay out a sidecar venv the way uv leaves it after a git install.
 
-    ``marker`` adds the ``.onair-sidecar`` file setup writes after creating a venv.
+    ``marker`` adds the ``.onair-sidecar`` file setup writes after creating a
+    venv; ``uv_made`` the ``uv = …`` line uv writes in ``pyvenv.cfg``.
     """
     venv.mkdir(parents=True, exist_ok=True)
+    if not (venv / "pyvenv.cfg").exists():  # keep the one a real `uv venv` wrote
+        cfg = "home = /usr/bin\n" + ("uv = 0.13.0\n" if uv_made else "")
+        (venv / "pyvenv.cfg").write_text(cfg + "version_info = 3.12.3\n")
     if marker:
         (venv / ".onair-sidecar").write_text("Created by the hermes-onair plugin.\n")
     if python:
@@ -33,6 +42,7 @@ def write_install(
         url = adapter.DROPCAST_REPO.removeprefix("git+")
         record = {"url": url, "vcs_info": {"vcs": "git", "commit_id": commit}}
         (info / "direct_url.json").write_text(json.dumps(record))
+        (info / "INSTALLER").write_text("uv\n")
 
 
 class FakeRunner:

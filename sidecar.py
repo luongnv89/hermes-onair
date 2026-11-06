@@ -6,20 +6,29 @@ the pinned engine package. This module runs uv itself (``uv venv`` and
 ``adapter`` everything engine-specific: what to install, which commit is
 installed, and whether the engine starts (AGENTS.md rule 4).
 
-Setup only ever writes to a sidecar it owns:
+Setup only ever writes to an absent path or a sidecar it owns. An existing
+directory is On Air's only when ALL of these hold:
 
-- the path must be a real directory directly inside the data dir, never a
-  symbolic link or anything that resolves elsewhere;
-- an existing directory must hold the ``.onair-sidecar`` marker, written right
-  after uv creates the venv. Only a marked venv is ever recreated with
-  ``uv venv --clear``;
-- a sidecar from before the marker existed (v0.1.0) is adopted, by writing
-  the marker, only when its venv has a Python and a PEP 610 record of an
-  install from the engine's own repository (``adapter.installed_commit``).
-  ``--check`` never writes; it reports such a sidecar as adoptable.
+- it is a real directory (not a symbolic link) directly inside the data dir;
+- its ``pyvenv.cfg`` is a regular file that says uv made it (``uv = …``);
+- ``adapter.pinned_install``: uv installed the engine there from its own
+  repository at the pinned commit (PEP 610 ``direct_url.json``);
+- and either it holds the ``.onair-sidecar`` marker (OWNED), or it has a
+  Python and no marker: a v0.1.0 sidecar, adopted by writing the marker
+  (ADOPTABLE). ``--check`` never writes; it reports it as adoptable.
 
-Anything else at that path is refused with a message asking the user to
-move it aside. This module never deletes anything itself.
+A marker alone is never enough. Only an owned venv is recreated with
+``uv venv --clear``; a venv setup creates in the same run is used for the
+install that follows. Anything else (a marked venv whose install never
+finished, a sidecar at another commit after a pin change, a foreign dir) is
+refused with a message asking the user to move it aside. This module never
+deletes anything itself.
+
+Not checked: whether the directory is older than its ``pyvenv.cfg``. Linux
+gives no directory birth time through ``os.stat`` (``st_birthtime`` is
+BSD/macOS-only), the directory's mtime/ctime move whenever uv or setup adds
+an entry (``.lock``, the marker), and a planted directory is naturally
+created before the file it holds, so the test would refuse nothing it should.
 
 Every process goes through an injected ``runner`` (``subprocess.run`` by
 default) and uv is found through an injected ``which``, so tests never spawn
@@ -50,15 +59,15 @@ INSTALL_TIMEOUT_S = 900
 
 # Who owns what sits at the sidecar path.
 ABSENT = "absent"
-OWNED = "owned"  # holds the marker
-ADOPTABLE = "adoptable"  # pre-marker sidecar: a venv with the engine's PEP 610 record
+OWNED = "owned"  # marker + uv-made venv + pinned engine install
+ADOPTABLE = "adoptable"  # no marker, a Python, uv-made, pinned engine install
 FOREIGN = "foreign"  # anything else: never written to
 
 _OWNER_TEXT = {
     ABSENT: "none yet",
-    OWNED: f"On Air ({MARKER} present)",
+    OWNED: f"On Air ({MARKER} present, pinned install)",
     ADOPTABLE: f"On Air, from before {MARKER} (setup adopts it)",
-    FOREIGN: f"not On Air (no {MARKER}); setup will not touch it",
+    FOREIGN: "not On Air's; setup will not touch it",
 }
 
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
@@ -81,6 +90,7 @@ class SidecarState:
     venv: Path
     problem: str | None
     owner: str
+    owner_note: str
     python_ok: bool
     commit: str | None
     pin_ok: bool
@@ -119,16 +129,45 @@ def path_problem(data_dir: Path, venv: Path) -> str | None:
 
 def ownership(venv: Path) -> str:
     """ABSENT, OWNED, ADOPTABLE or FOREIGN. Reads only."""
+    return _ownership(venv)[0]
+
+
+def _uv_made(venv: Path) -> bool:
+    cfg = venv / "pyvenv.cfg"
+    if cfg.is_symlink() or not cfg.is_file():
+        return False
+    try:
+        lines = cfg.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    return any(line.partition("=")[0].strip() == "uv" for line in lines)
+
+
+def _ownership(venv: Path) -> tuple[str, str]:
+    """(owner, why) for what sits at *venv*. Reads only."""
     if not venv.exists() and not venv.is_symlink():
-        return ABSENT
-    if not venv.is_dir():
-        return FOREIGN
+        return ABSENT, ""
+    if venv.is_symlink() or not venv.is_dir():
+        return FOREIGN, "it is not a real directory"
     marker = venv / MARKER
-    if marker.is_file() and not marker.is_symlink():
-        return OWNED
-    if venv_python(venv).is_file() and adapter.installed_commit(venv) is not None:
-        return ADOPTABLE
-    return FOREIGN
+    marked = marker.is_file() and not marker.is_symlink()
+    if not _uv_made(venv):
+        return FOREIGN, "it is not a venv made by uv (no `uv = …` in pyvenv.cfg)"
+    if not adapter.pinned_install(venv):
+        if marked:
+            return FOREIGN, (
+                f"it holds {MARKER} but no {adapter.NAME} installed by uv at pin "
+                f"{adapter.DROPCAST_PIN} (an unfinished or older setup, or a planted marker)"
+            )
+        return FOREIGN, (
+            f"it was not created by On Air (no {MARKER}, no {adapter.NAME} at pin "
+            f"{adapter.DROPCAST_PIN})"
+        )
+    if marked:
+        return OWNED, ""
+    if venv_python(venv).is_file():
+        return ADOPTABLE, ""
+    return FOREIGN, f"it has no {MARKER} and no Python"
 
 
 def write_marker(venv: Path) -> None:
@@ -183,14 +222,14 @@ def inspect(data_dir: Path, runner: Runner = subprocess.run) -> SidecarState:
     and only in a venv that is safely placed and On Air's own."""
     venv = venv_dir(data_dir)
     problem = path_problem(data_dir, venv)
-    owner = ownership(venv)
+    owner, note = _ownership(venv)
     python_ok = venv_python(venv).is_file()
     commit = adapter.installed_commit(venv) if python_ok else None
     pin_ok = adapter.pin_matches(commit)
     smoke_ok, detail = False, "skipped"
     if python_ok and pin_ok and problem is None and owner in (OWNED, ADOPTABLE):
         smoke_ok, detail = adapter.smoke(venv, runner)
-    return SidecarState(venv, problem, owner, python_ok, commit, pin_ok, smoke_ok, detail)
+    return SidecarState(venv, problem, owner, note, python_ok, commit, pin_ok, smoke_ok, detail)
 
 
 def _refuse(venv: Path, why: str, err: TextIO) -> int:
@@ -232,7 +271,7 @@ def setup(
     if state.problem:
         return _refuse(venv, state.problem, err)
     if state.owner == FOREIGN:
-        return _refuse(venv, f"it was not created by On Air (no {MARKER})", err)
+        return _refuse(venv, state.owner_note, err)
 
     try:
         if state.owner == ADOPTABLE:
@@ -258,6 +297,7 @@ def setup(
         )
         return 2
 
+    created = False
     if not state.python_ok:
         Path(data_dir).mkdir(parents=True, exist_ok=True)
         argv = [uv, "venv", "--python", python_request or DEFAULT_SIDECAR_PYTHON]
@@ -277,6 +317,7 @@ def setup(
             print(f"✗ uv could not create the sidecar venv (exit {proc.returncode}):", file=err)
             print(_tail(proc.stderr), file=err)
             return 1
+        created = True
         try:
             write_marker(venv)
         except OSError as exc:
@@ -305,16 +346,28 @@ def setup(
         else:
             print(f"✗ uv could not install {name} (exit {proc.returncode}):", file=err)
         print(_tail(proc.stderr), file=err)
+        _unfinished(venv, created, err)
         return 1
 
     state = inspect(data_dir, runner)
     if not state.ok:
         print(f"✗ {name} installed, but the sidecar check failed:", file=err)
         _report(state, err)
+        _unfinished(venv, created, err)
         return 1
     print(f"✓ On Air sidecar ready ({name} {state.commit[:12]})", file=out)
     print(f"  venv: {state.venv}", file=out)
     return 0
+
+
+def _unfinished(venv: Path, created: bool, err: TextIO) -> None:
+    """A marker alone does not make a venv On Air's: say what the next run needs."""
+    if created:
+        print(
+            f"  The venv this run created at {venv} holds no pinned {adapter.NAME}, so the "
+            "next setup will not reuse it: move it aside first.",
+            file=err,
+        )
 
 
 def _report(state: SidecarState, out: TextIO) -> None:
@@ -322,7 +375,8 @@ def _report(state: SidecarState, out: TextIO) -> None:
     print(f"  venv:    {state.venv} ({'present' if state.venv.exists() else 'missing'})", file=out)
     if state.problem:
         print(f"  path:    UNSAFE: {state.problem}", file=out)
-    print(f"  owner:   {_OWNER_TEXT[state.owner]}", file=out)
+    note = f" ({state.owner_note})" if state.owner_note else ""
+    print(f"  owner:   {_OWNER_TEXT[state.owner]}{note}", file=out)
     print(f"  python:  {'ok' if state.python_ok else 'missing'}", file=out)
     if state.commit is None:
         print(f"  {name}: not installed from a pinned commit", file=out)

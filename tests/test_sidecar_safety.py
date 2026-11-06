@@ -95,7 +95,7 @@ def test_foreign_venv_at_the_plugin_path_is_refused(tmp_path):  # scenario E
     before = snapshot(tmp_path)
     rc, _, err = run_setup(tmp_path)
     assert rc == 1
-    assert "was not created by On Air (no .onair-sidecar)" in err
+    assert "Not touching" in err and "not a venv made by uv" in err
     assert snapshot(tmp_path) == before
 
 
@@ -191,7 +191,7 @@ def test_setup_adopts_a_pre_marker_sidecar(tmp_path):
 
 def test_only_a_marked_venv_is_cleared(tmp_path):
     venv = tmp_path / "sidecar"
-    write_install(venv, commit=None, python=False)  # marked, broken
+    write_install(venv, python=False)  # marked, pinned record, python gone
     runner = FakeRunner().on(lambda a: a[1] == "venv", done(1, "", "stop here"))
     run_setup(tmp_path, runner)
     assert runner.argvs()[0][-2:] == ["--clear", str(venv)]
@@ -223,7 +223,8 @@ def test_real_uv_rebuilds_a_marked_broken_venv(tmp_path, real_uv_env):
     data = tmp_path / "data"
     venv = data / "sidecar"
     venv_looking(venv, "stale.txt")
-    sidecar.write_marker(venv)
+    (venv / "pyvenv.cfg").write_text("home = /usr/bin\nuv = 0.13.0\n")
+    write_install(venv, PINNED_SHA, python=False)  # On Air's: marker + pinned record
     runner = hybrid_runner(data, real_uv_env)
     out, err = io.StringIO(), io.StringIO()
     rc = sidecar.setup(data, runner=runner, which=shutil.which, python_request=sys.executable,
@@ -240,7 +241,8 @@ def test_real_uv_does_not_follow_a_symlink_inside_the_venv(tmp_path, real_uv_env
     data, outside = tmp_path / "data", tmp_path / "outside"
     venv = data / "sidecar"
     venv_looking(venv, "stale.txt")
-    sidecar.write_marker(venv)
+    (venv / "pyvenv.cfg").write_text("home = /usr/bin\nuv = 0.13.0\n")
+    write_install(venv, PINNED_SHA, python=False)
     outside.mkdir()
     (outside / "keep.txt").write_text("keep\n")
     (venv / "link-out").symlink_to(outside)
@@ -269,4 +271,53 @@ def test_real_uv_is_never_reached_for_dirs_that_are_not_ours(tmp_path, real_uv_e
     rc = sidecar.setup(data, runner=runner, which=shutil.which, python_request=sys.executable,
                        env={"PATH": os.environ.get("PATH", "")}, out=out, err=err)
     assert rc == 1 and runner.calls == []
+    assert snapshot(tmp_path) == before
+
+
+# --- N2: a marker alone, or a planted record, does not make a dir ours ---
+
+
+def planted(venv: Path, *, uv_line=True, installer="uv", commit=PINNED_SHA, marker=False):
+    """A foreign dir dressed up as a sidecar (reviewer scenarios F and H)."""
+    venv_looking(venv, "foreign.txt")
+    (venv / "bin" / "python").write_text("")
+    if uv_line:
+        (venv / "pyvenv.cfg").write_text("home = /usr/bin\nuv = 0.13.0\n")
+    if commit:
+        write_install(venv, commit, marker=False)
+        info = next(venv.glob("lib/*/site-packages/dropcast-*.dist-info"))
+        if installer is None:
+            (info / "INSTALLER").unlink()
+        else:
+            (info / "INSTALLER").write_text(installer + "\n")
+    if marker:
+        (venv / ".onair-sidecar").write_text("planted\n")
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "reason"),
+    [
+        ({"uv_line": False}, "not a venv made by uv"),  # scenario F as the reviewer built it
+        ({"installer": "pip"}, "no DropCast at pin"),
+        ({"installer": None}, "no DropCast at pin"),
+        ({"commit": "0123456789abcdef0123456789abcdef01234567"}, "no DropCast at pin"),
+        ({"commit": None, "marker": True}, "holds .onair-sidecar but no DropCast"),  # H
+        ({"uv_line": False, "commit": None, "marker": True}, "not a venv made by uv"),
+    ],
+)
+def test_planted_sidecars_are_refused(tmp_path, kwargs, reason):
+    planted(tmp_path / "sidecar", **kwargs)
+    before = snapshot(tmp_path)
+    rc, _, err = run_setup(tmp_path)  # FakeRunner without rules: no process may start
+    assert rc == 1 and reason in err
+    assert snapshot(tmp_path) == before
+    assert sidecar.ownership(tmp_path / "sidecar") == sidecar.FOREIGN
+
+
+def test_a_marked_venv_needs_the_pinned_record_to_be_cleared(tmp_path):
+    venv = tmp_path / "sidecar"
+    planted(venv, commit=None, marker=True)
+    (venv / "bin" / "python").unlink()  # broken: setup would want to rebuild it
+    before = snapshot(tmp_path)
+    assert run_setup(tmp_path)[0] == 1
     assert snapshot(tmp_path) == before

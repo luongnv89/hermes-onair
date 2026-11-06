@@ -45,11 +45,28 @@ def installing(data_dir, commit=None):
 
 
 def creating_venv(data_dir):
+    """`uv venv`: an empty uv-made venv (setup writes the marker itself)."""
+
     def respond(argv):
-        write_install(sidecar.venv_dir(data_dir), commit=None)
+        write_install(sidecar.venv_dir(data_dir), commit=None, marker=False)
         return done(0)
 
     return respond
+
+
+def fresh(data_dir, install):
+    """A runner for a setup that starts from no sidecar: real-looking venv, *install*."""
+    return (
+        FakeRunner()
+        .on(is_venv, creating_venv(data_dir))
+        .on(is_install, install)
+        .on(is_smoke, done(0))
+    )
+
+
+def install_call(runner):
+    (call,) = [c for c in runner.calls if is_install(c["argv"])]
+    return call
 
 
 def run_setup(data_dir, runner, **kwargs):
@@ -92,18 +109,28 @@ def test_second_setup_is_a_no_op(tmp_path):
     assert "already set up" in out
 
 
-def test_a_different_commit_is_reinstalled_in_the_same_venv(tmp_path):
+def test_a_sidecar_at_another_commit_is_refused(tmp_path):
+    # Ownership needs the pinned install, so after a pin change the old sidecar is
+    # moved aside by hand rather than rewritten in place.
     write_install(sidecar.venv_dir(tmp_path), OTHER_SHA)
-    runner = FakeRunner().on(is_install, installing(tmp_path)).on(is_smoke, done(0))
+    rc, _, err = run_setup(tmp_path, FakeRunner())  # no process may start
+    assert rc == 1
+    assert f"no DropCast installed by uv at pin {adapter.DROPCAST_PIN}" in err
+    assert "Move it aside" in err
+
+
+def test_an_owned_venv_whose_smoke_fails_is_reinstalled_in_place(tmp_path):
+    write_install(sidecar.venv_dir(tmp_path))
+    smokes = iter([done(1), done(0)])
+    runner = FakeRunner().on(is_smoke, lambda a: next(smokes)).on(is_install, done(0))
     rc, _, err = run_setup(tmp_path, runner)
     assert rc == 0, err
-    install, smoke = runner.argvs()
-    assert is_install(install) and is_smoke(smoke)
-    assert "--reinstall-package" in install
+    assert "--reinstall-package" in install_call(runner)["argv"]
+    assert not any(is_venv(a) for a in runner.argvs())
 
 
 def test_a_marked_venv_without_python_is_recreated_with_clear(tmp_path):
-    write_install(sidecar.venv_dir(tmp_path), commit=None, python=False)  # marker only
+    write_install(sidecar.venv_dir(tmp_path), python=False)  # marker + pinned record
     runner = (
         FakeRunner()
         .on(is_venv, creating_venv(tmp_path))
@@ -113,15 +140,6 @@ def test_a_marked_venv_without_python_is_recreated_with_clear(tmp_path):
     rc, _, err = run_setup(tmp_path, runner)
     assert rc == 0, err
     assert runner.argvs()[0][-2:] == ["--clear", str(tmp_path / "sidecar")]
-
-
-def test_a_broken_smoke_triggers_a_reinstall(tmp_path):
-    write_install(sidecar.venv_dir(tmp_path))
-    smokes = iter([done(1), done(0)])
-    runner = FakeRunner().on(is_smoke, lambda a: next(smokes)).on(is_install, done(0))
-    rc, _, err = run_setup(tmp_path, runner)
-    assert rc == 0, err
-    assert sum(is_install(a) for a in runner.argvs()) == 1
 
 
 def test_missing_uv_is_a_clear_error(tmp_path):
@@ -169,18 +187,20 @@ def test_python_request_is_passed_to_uv_venv(tmp_path):
     ],
 )
 def test_unreachable_repo_is_a_clear_error(tmp_path, stderr):
-    write_install(sidecar.venv_dir(tmp_path), commit=None)
-    runner = FakeRunner().on(is_install, done(1, "", stderr))
+    runner = fresh(tmp_path, done(1, "", stderr))
     rc, _, err = run_setup(tmp_path, runner)
     assert rc == 1
     assert "DropCast repository unavailable" in err
     assert adapter.install_spec() in err
     assert "ssh -T git@github.com" in err
+    assert "the next setup will not reuse it: move it aside first" in err
+    # ... and indeed the next run refuses it rather than trusting the marker alone.
+    rc, _, err = run_setup(tmp_path, FakeRunner())
+    assert rc == 1 and "holds .onair-sidecar but no DropCast" in err
 
 
 def test_other_install_failures_show_uv_output(tmp_path):
-    write_install(sidecar.venv_dir(tmp_path), commit=None)
-    runner = FakeRunner().on(is_install, done(1, "", "No solution found when resolving"))
+    runner = fresh(tmp_path, done(1, "", "No solution found when resolving"))
     rc, _, err = run_setup(tmp_path, runner)
     assert rc == 1
     assert "uv could not install DropCast (exit 1)" in err
@@ -204,20 +224,18 @@ def test_timeouts_and_missing_binaries_are_reported(tmp_path):
 
 
 def test_install_that_does_not_land_the_pin_fails(tmp_path):
-    write_install(sidecar.venv_dir(tmp_path), commit=None)
-    runner = FakeRunner().on(is_install, done(0))
+    runner = fresh(tmp_path, done(0))
     rc, _, err = run_setup(tmp_path, runner)
     assert rc == 1
     assert "sidecar check failed" in err
 
 
 def test_existing_git_ssh_command_is_kept(tmp_path):
-    write_install(sidecar.venv_dir(tmp_path), commit=None)
-    runner = FakeRunner().on(is_install, installing(tmp_path)).on(is_smoke, done(0))
+    runner = fresh(tmp_path, installing(tmp_path))
     out, err = io.StringIO(), io.StringIO()
     env = {"GIT_SSH_COMMAND": "ssh -i /k"}
     sidecar.setup(tmp_path, runner=runner, which=which_uv, env=env, out=out, err=err)
-    assert runner.calls[0]["env"]["GIT_SSH_COMMAND"] == "ssh -i /k"
+    assert install_call(runner)["env"]["GIT_SSH_COMMAND"] == "ssh -i /k"
 
 
 # --- --check ---
@@ -264,13 +282,12 @@ def test_check_reports_a_failed_smoke(tmp_path):
 
 
 def test_install_env_drops_paid_keys_and_engine_knobs(tmp_path):
-    write_install(sidecar.venv_dir(tmp_path), commit=None)
-    runner = FakeRunner().on(is_install, installing(tmp_path)).on(is_smoke, done(0))
+    runner = fresh(tmp_path, installing(tmp_path))
     env = {name: "secret" for name in adapter.SCRUBBED_ENV} | {"PATH": "/bin", "HOME": "/h"}
     out, err = io.StringIO(), io.StringIO()
     rc = sidecar.setup(tmp_path, runner=runner, which=which_uv, env=env, out=out, err=err)
     assert rc == 0, err.getvalue()
-    install_env = runner.calls[0]["env"]
+    install_env = install_call(runner)["env"]
     assert not set(install_env) & adapter.SCRUBBED_ENV
     assert install_env["PATH"] == "/bin" and install_env["HOME"] == "/h"
     assert "OPENROUTER_API_KEY" in adapter.SCRUBBED_ENV

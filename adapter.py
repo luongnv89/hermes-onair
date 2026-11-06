@@ -263,6 +263,31 @@ def installed_commit(venv: Path) -> str | None:
     else (another URL, a local path install, a missing or broken file) is
     None, so the caller reinstalls.
     """
+    record = _install_record(venv)
+    return record[0] if record else None
+
+
+def pinned_install(venv: Path) -> bool:
+    """True when uv installed DropCast in *venv* from the repo at the pinned commit.
+
+    The evidence ``hermes onair setup`` needs before it treats a venv as its
+    own: PEP 610 ``direct_url.json`` names the DropCast repository with a
+    ``commit_id`` starting with the pin, and the dist-info's ``INSTALLER``
+    says ``uv``. Structural evidence, not proof: anyone who can write the
+    plugin's data dir can copy a real install.
+    """
+    record = _install_record(venv)
+    if record is None or not pin_matches(record[0]):
+        return False
+    installer = record[1] / "INSTALLER"
+    try:
+        return not installer.is_symlink() and installer.read_text(encoding="utf-8").strip() == "uv"
+    except OSError:
+        return False
+
+
+def _install_record(venv: Path) -> tuple[str, Path] | None:
+    """(commit, dist-info dir) of DropCast's PEP 610 git record in *venv*, or None."""
     pattern = f"lib/python*/site-packages/{PACKAGE}-*.dist-info/direct_url.json"
     for record in sorted(Path(venv).glob(pattern)):
         try:
@@ -274,7 +299,7 @@ def installed_commit(venv: Path) -> str | None:
         vcs = data.get("vcs_info")
         commit = vcs.get("commit_id") if isinstance(vcs, dict) else None
         if isinstance(commit, str) and _FULL_SHA.fullmatch(commit):
-            return commit
+            return commit, record.parent
     return None
 
 
