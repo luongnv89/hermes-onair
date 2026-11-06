@@ -560,8 +560,9 @@ def test_synthesize_reads_settings_at_call_time(tmp_path, data_dir, key):
     run = runner()
     config = Config()
     tts = router.OnAirTTS(config, lambda: data_dir, http=http, runner=run,
-                          which=lambda name: name if name == FFMPEG else None)
-    config.values.update(language="fr", ffmpeg_bin=FFMPEG, voices={"heygen": {"fr": "bram"}})
+                          which=lambda name: FFMPEG if name == "ffmpeg-custom" else None)
+    config.values.update(language="fr", ffmpeg_bin="ffmpeg-custom",
+                         voices={"heygen": {"fr": "bram"}})
     out = tmp_path / "x.mp3"
     tts.synthesize(EN, str(out))
     assert http.posts() == [HEYGEN]
@@ -706,3 +707,31 @@ def test_ffmpeg_env_scrubs_an_injected_environment():
     child = router.ffmpeg_env({"OPENROUTER_API_KEY": KEY, "PATH": "/bin", "LANG": "C"})
     assert child == {"PATH": "/bin", "LANG": "C"}
     assert "OPENROUTER_API_KEY" in adapter.SCRUBBED_ENV
+
+
+# ---------------------------------- review r1, N3: a bare ffmpeg_bin name
+
+
+def test_a_bare_ffmpeg_bin_name_never_resolves_in_the_cwd(tmp_path, monkeypatch):
+    planted = tmp_path / "ffmpeg"
+    planted.write_text("#!/bin/sh\nexit 0\n")
+    planted.chmod(0o755)
+    monkeypatch.chdir(tmp_path)
+    assert router.find_ffmpeg("ffmpeg", which=lambda name: None) is None
+    assert router.find_ffmpeg("ffmpeg", which=lambda name: "/usr/bin/ffmpeg") == "/usr/bin/ffmpeg"
+    # An explicit relative path is honoured, made absolute (never a bare argv[0]).
+    assert router.find_ffmpeg("./ffmpeg", which=lambda name: None) == str(planted)
+
+
+def test_ffmpeg_bin_with_a_tilde_or_separator_is_a_path(tmp_path, monkeypatch):
+    exe = tmp_path / "bin" / "ffmpeg"
+    exe.parent.mkdir()
+    exe.write_text("")
+    exe.chmod(0o755)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    never = lambda name: pytest.fail("a path must not go through which()")  # noqa: E731
+    assert router.find_ffmpeg("~/bin/ffmpeg", which=never) == str(exe)
+    assert router.find_ffmpeg(str(exe), which=never) == str(exe)
+    assert router.find_ffmpeg(str(tmp_path / "missing" / "ffmpeg"), which=never) is None
+    exe.chmod(0o644)
+    assert router.find_ffmpeg(str(exe), which=never) is None  # not executable

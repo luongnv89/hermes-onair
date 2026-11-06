@@ -182,12 +182,17 @@ def pinned_voice(voice: Any) -> tuple[str, str] | None:
 def find_ffmpeg(
     configured: Any = DEFAULT_FFMPEG_BIN, which: Which = shutil.which, home: Path | None = None
 ) -> str | None:
-    """ffmpeg: the ``ffmpeg_bin`` setting, else PATH, else Hermes's managed copy."""
+    """ffmpeg: the ``ffmpeg_bin`` setting, else PATH, else Hermes's managed copy.
+
+    The setting is a path only when it holds a path separator or starts with
+    ``~``; a bare name is looked up on PATH, never in the current directory.
+    """
     if isinstance(configured, str) and configured.strip():
-        path = Path(configured.strip()).expanduser()
-        if path.is_file() and os.access(path, os.X_OK):
-            return str(path)
-        return which(configured.strip())
+        value = configured.strip()
+        if os.sep in value or (os.altsep and os.altsep in value) or value.startswith("~"):
+            path = Path(os.path.abspath(os.path.expanduser(value)))  # "./ffmpeg" stays a path
+            return str(path) if path.is_file() and os.access(path, os.X_OK) else None
+        return which(value)
     found = which("ffmpeg")
     if found:
         return found
