@@ -29,6 +29,7 @@ import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
+from http.client import HTTPException
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +69,11 @@ class HttpResponse:
 Http = Callable[..., HttpResponse]
 Clock = Callable[[], float]
 
+#: What a transport may raise for a network failure. ``http.client`` errors
+#: (a body cut off mid-download, a garbled status line) are not ``OSError``;
+#: callers treat them the same, so any injected transport falls through too.
+NETWORK_ERRORS = (OSError, HTTPException)
+
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """A redirect is an answer, not something to follow (never re-send the key)."""
@@ -97,12 +103,15 @@ def urllib_http(
     except urllib.error.HTTPError as exc:
         try:
             data = exc.read(4096)
-        except OSError:
+        except (OSError, HTTPException, ValueError):
             data = b""
         return HttpResponse(exc.code, dict(exc.headers.items()) if exc.headers else {}, data)
     except urllib.error.URLError as exc:
         reason = exc.reason if isinstance(exc.reason, str) else type(exc.reason).__name__
         raise OSError(f"network error: {reason}") from None
+    except (HTTPException, ValueError) as exc:
+        # IncompleteRead, BadStatusLine, LineTooLong, a malformed answer: not OSError.
+        raise OSError(f"network error: {type(exc).__name__}") from None
 
 
 def api_key(environ: Mapping[str, str] | None = None) -> str | None:
@@ -216,7 +225,7 @@ class Catalog:
                 "GET", MODELS_URL, headers={"Accept": "application/json"}, body=None,
                 timeout=LIST_TIMEOUT_S,
             )
-        except OSError as exc:
+        except NETWORK_ERRORS as exc:
             raise OpenRouterError(f"model list unreachable: {scrub(exc)}") from None
         if response.status != 200:
             raise OpenRouterError(f"model list answered HTTP {response.status}")
@@ -291,7 +300,7 @@ def speech(
     }
     try:
         response = http("POST", SPEECH_URL, headers=headers, body=body, timeout=SPEECH_TIMEOUT_S)
-    except (OSError, TimeoutError) as exc:
+    except NETWORK_ERRORS as exc:
         raise OpenRouterError(f"network error: {scrub(exc, key)}") from None
     if response.status != 200:
         raise OpenRouterError(f"HTTP {response.status}{_detail(response, key)}")

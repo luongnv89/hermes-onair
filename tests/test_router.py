@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import os
@@ -185,6 +186,25 @@ def test_network_errors_and_timeouts_fall_through(tmp_path, data_dir, key, error
     env = environment(data_dir, http)
     assert speak(tmp_path, env)[0] == "heygen"
     assert "network error" in env.attempts[0]["error"]
+
+
+def test_a_download_cut_off_mid_body_falls_through_to_edge(tmp_path, data_dir, key):
+    cut = http.client.IncompleteRead(b"ID3", 4096)
+    http_ = FakeHttp(speech={FISH: cut, HEYGEN: http.client.BadStatusLine("garbled")})
+    env = environment(data_dir, http_)
+    engine, out = speak(tmp_path, env)
+    assert engine == "edge" and out.read_bytes() == EDGE_MP3
+    assert tried(env) == [("fish", True), ("heygen", True), ("edge", False)]
+    assert all("network error" in a["error"] for a in env.attempts[:2])
+
+
+def test_a_model_list_cut_off_falls_through_to_edge(tmp_path, data_dir, key):
+    cut = http.client.IncompleteRead(b'{"data": [')
+    http_ = FakeHttp(models=cut, speech={FISH: audio(MP3_BYTES)})
+    env = environment(data_dir, http_)
+    assert speak(tmp_path, env)[0] == "edge"
+    assert http_.posts() == []
+    assert "model list unreachable" in env.attempts[0]["error"]
 
 
 def test_a_missing_key_goes_straight_to_edge_with_no_request(tmp_path, data_dir):

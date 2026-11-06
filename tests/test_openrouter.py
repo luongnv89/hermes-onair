@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 
@@ -123,6 +124,16 @@ def test_a_stale_cache_is_not_used_when_the_fetch_fails(tmp_path):
         cat.check(FISH)
 
 
+@pytest.mark.parametrize(
+    "error", [http.client.IncompleteRead(b""), http.client.LineTooLong("header line")]
+)
+def test_an_http_client_error_on_the_list_refuses(tmp_path, error):
+    cat = catalog(tmp_path, FakeHttp(models=error))
+    with pytest.raises(openrouter.OpenRouterError, match="unreachable"):
+        cat.check(FISH)
+    assert not (tmp_path / openrouter.CACHE_NAME).exists()
+
+
 def test_no_list_and_no_cache_refuses_every_model(tmp_path):
     cat = catalog(tmp_path, FakeHttp(models=TimeoutError("slow")))
     for model in (FISH, HEYGEN):
@@ -207,7 +218,15 @@ def test_any_error_status_raises(tmp_path, code):
         speak(tmp_path, FakeHttp(speech={FISH: status(code)}))
 
 
-@pytest.mark.parametrize("error", [OSError("connection refused"), TimeoutError("timed out")])
+@pytest.mark.parametrize(
+    "error",
+    [
+        OSError("connection refused"),
+        TimeoutError("timed out"),
+        http.client.IncompleteRead(b"ID3"),  # body cut off mid-download
+        http.client.BadStatusLine("garbled"),
+    ],
+)
 def test_network_errors_raise(tmp_path, error):
     with pytest.raises(openrouter.OpenRouterError, match="network error"):
         speak(tmp_path, FakeHttp(speech={FISH: error}))
@@ -256,3 +275,47 @@ def test_api_key_reads_only_the_environment(monkeypatch):
 def test_the_real_transport_refuses_plain_http():
     with pytest.raises(OSError, match="https"):
         openrouter.urllib_http("GET", "http://openrouter.ai/x", headers={}, body=None, timeout=1)
+
+
+class _Response:
+    status = 200
+    headers: dict = {}
+
+    def __init__(self, error):
+        self.error = error
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self, _limit):
+        raise self.error
+
+
+class _Opener:
+    def __init__(self, open_error=None, read_error=None):
+        self.open_error, self.read_error = open_error, read_error
+
+    def open(self, request, timeout):
+        if self.open_error is not None:
+            raise self.open_error
+        return _Response(self.read_error)
+
+
+@pytest.mark.parametrize(
+    "opener",
+    [
+        _Opener(open_error=http.client.BadStatusLine("garbled")),
+        _Opener(open_error=http.client.LineTooLong("header line")),
+        _Opener(open_error=ValueError("malformed")),
+        _Opener(read_error=http.client.IncompleteRead(b"ID3", 4096)),
+    ],
+)
+def test_the_real_transport_turns_http_client_errors_into_oserror(monkeypatch, opener):
+    monkeypatch.setattr(openrouter, "_OPENER", opener)
+    with pytest.raises(OSError, match="network error"):
+        openrouter.urllib_http(
+            "GET", openrouter.MODELS_URL, headers={}, body=None, timeout=1
+        )
