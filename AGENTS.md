@@ -12,9 +12,10 @@ These are not negotiable. A change that breaks one is wrong, even if tests pass.
    in the public model list (a copy up to 24 h old is fine) and either its id
    ends in `:free` or every listed price is zero. A non-zero listed price means
    paid, whatever the id. If there is no list and no cache, or the check fails,
-   skip OpenRouter. This rule covers every model the plugin itself calls,
-   including calls made through `ctx.llm`. No paid runners, services, or CI
-   minutes either.
+   skip OpenRouter. This rule covers every model the plugin itself calls.
+   `ctx.llm` runs on the user's own model and is host-owned: no override;
+   record the returned model id. No paid runners, services, or CI minutes
+   either.
 2. **The API key comes only from the environment.** Read `OPENROUTER_API_KEY`
    from env. Never put it in a file, config, log, print, error message,
    fixture, or commit.
