@@ -77,7 +77,8 @@ def show(claim: personas.Claim, voices: Any = None) -> str:
     persona = claim.persona
     since = f" since {claim.claimed_at}" if claim.claimed_at else ""
     made = {"set": "set", "set --force": "set with --force (shared)"}.get(claim.how, "claimed")
-    how = {"claimed": "just claimed on first use", "stored": f"{made}{since}",
+    first = "kept after a rename" if claim.how == "adopted" else "just claimed on first use"
+    how = {"claimed": first, "stored": f"{made}{since}",
            "set": f"{made}{since}", "unstored": "not stored: the claim could not be written"}
     lines = [
         f"Profile {claim.profile} speaks as {persona.name} ({persona.gender}'s voice; "

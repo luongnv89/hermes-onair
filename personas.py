@@ -299,18 +299,33 @@ def held_by_siblings(home: Path | None) -> dict[str, list[str]]:
         record = read_record(claim_path_of(sibling))
         if record is None:
             continue
-        label = record.get("profile") if isinstance(record.get("profile"), str) else ""
-        label = label.strip() or ("default" if root is not None and _same(sibling, root)
-                                  else sibling.name)
-        held.setdefault(record["persona"], []).append(label)
+        held.setdefault(record["persona"], []).append(_label_of(sibling, root, record))
     return held
+
+
+def _label_of(sibling: Path, root: Path | None, record: Mapping[str, Any]) -> str:
+    """A sibling's name: its ``profiles/<name>`` directory, else the root's recorded name.
+
+    The directory wins over the record's ``profile`` field, which a copied
+    file (``hermes profile create --clone-all``) carries from its source.
+    """
+    if root is None or not _same(sibling, root):
+        return sibling.name
+    name = record.get("profile")
+    return name.strip() if isinstance(name, str) and name.strip() else "default"
+
+
+def _owned(record: Mapping[str, Any], profile: str) -> bool:
+    """True when *record* was written for *profile* (a record with no name counts)."""
+    name = record.get("profile")
+    return not isinstance(name, str) or not name.strip() or name.strip() == profile
 
 
 def all_claims(home: Path | None, data_dir: Path, profile: str) -> dict[str, list[str]]:
     """persona id -> every holder of this root, this profile included (read-only)."""
     held = held_by_siblings(home)
     mine = read_record(Path(data_dir) / CLAIM_FILE)
-    if mine is not None:
+    if mine is not None and (_owned(mine, profile) or not held.get(mine["persona"])):
         held.setdefault(mine["persona"], []).append(profile)
     return held
 
@@ -397,24 +412,38 @@ def claim(data_dir: Path, profile: str, home: Path | None) -> Claim:
     home (None for an odd-shaped data dir: no siblings, no lock). A claim
     that cannot be written is still returned (``status="unstored"``) so
     speech goes on; the next call tries again.
+
+    A stored record names its profile. One written for another name was
+    copied or moved here: a renamed profile keeps its persona while no
+    sibling holds it (the record is re-labelled); a clone made with
+    ``hermes profile create --clone-all``, whose source still holds the
+    persona, claims a new one instead of sharing it.
     """
     path = Path(data_dir) / CLAIM_FILE
     record = read_record(path)
-    if record is not None:
+    if record is not None and _owned(record, profile):
         return _stored(profile, path, record)
     with root_lock(home):
         record = read_record(path)  # another process of this profile may have won
-        if record is not None:
+        if record is not None and _owned(record, profile):
             return _stored(profile, path, record)
-        persona = probe(profile, held_by_siblings(home))
-        new = _record(profile, persona, "first-use")
+        held = held_by_siblings(home)
+        if record is not None and not held.get(record["persona"]):
+            persona, how = BY_ID[record["persona"]], "adopted"  # renamed: keep the voice
+        else:
+            if record is not None:
+                log.info("profile %s: the claim file names %s, whose persona %s is held by %s;"
+                         " claiming a new one", profile, record.get("profile"),
+                         record["persona"], ", ".join(held[record["persona"]]))
+            persona, how = probe(profile, held), "first-use"
+        new = _record(profile, persona, how)
         try:
             write_record(path, new)
         except OSError as exc:
             log.warning("cannot store the persona claim in %s (%s); using %s unstored",
                         path, exc.strerror or type(exc).__name__, persona.id)
             return Claim(profile, persona, path, "unstored")
-    log.info("profile %s claimed persona %s", profile, persona.id)
+    log.info("profile %s claimed persona %s (%s)", profile, persona.id, how)
     return Claim(profile, persona, path, "claimed", new["claimed_at"], new["how"])
 
 

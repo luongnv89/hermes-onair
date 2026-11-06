@@ -435,3 +435,46 @@ def test_set_refuses_an_unknown_name(tmp_path):
     with pytest.raises(personas.ClaimRefused, match="choose one of: bob, alice"):
         personas.set_claim(data_of(root, "forge"), "forge", home_of(root, "forge"), "zed")
     assert not (data_of(root, "forge") / "persona.json").exists()
+
+
+# ------------------------------------------------ copied and moved claims (review)
+
+
+def test_a_cloned_profile_claims_its_own_persona(tmp_path):
+    # `hermes profile create forge2 --clone-all` copies forge's plugin-data.
+    root = make_root(tmp_path, ("forge", "forge2", "mail"))
+    source = claim(root, "forge").persona.id
+    claim(root, "mail")
+    copied = (data_of(root, "forge") / "persona.json").read_bytes()
+    (data_of(root, "forge2") / "persona.json").write_bytes(copied)
+    # Until forge2 speaks, its copy still counts (labelled by directory, not by the
+    # record): a persona that may be in use is never handed to a third profile.
+    assert personas.held_by_siblings(home_of(root, "mail"))[source] == ["forge", "forge2"]
+    got = claim(root, "forge2")
+    assert got.status == "claimed" and got.persona.id not in (source, stored(root, "mail"))
+    record = json.loads((data_of(root, "forge2") / "persona.json").read_text())
+    assert record["profile"] == "forge2" and record["how"] == "first-use"
+    assert (data_of(root, "forge") / "persona.json").read_bytes() == copied  # never written
+    assert claim(root, "forge2").persona is got.persona  # stable afterwards
+    assert personas.held_by_siblings(home_of(root, "mail"))[source] == ["forge"]
+
+
+def test_a_renamed_profile_keeps_its_persona(tmp_path):
+    root = make_root(tmp_path, ("forge", "mail"))
+    before = claim(root, "forge").persona
+    claim(root, "mail")
+    (root / "profiles" / "forge").rename(root / "profiles" / "anvil")
+    got = claim(root, "anvil")
+    assert got.persona is before and got.how == "adopted"
+    record = json.loads((data_of(root, "anvil") / "persona.json").read_text())
+    assert record["profile"] == "anvil" and record["persona"] == before.id
+    assert claim(root, "anvil").status == "stored"
+
+
+def test_a_copied_claim_is_not_listed_as_this_profiles(tmp_path):
+    root = make_root(tmp_path, ("forge", "forge2"))
+    source = claim(root, "forge").persona.id
+    (data_of(root, "forge2") / "persona.json").write_bytes(
+        (data_of(root, "forge") / "persona.json").read_bytes())
+    held = personas.all_claims(home_of(root, "forge2"), data_of(root, "forge2"), "forge2")
+    assert held == {source: ["forge"]}

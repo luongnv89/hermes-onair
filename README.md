@@ -141,6 +141,10 @@ that profile's `plugin-data/onair/persona.json` and survives restarts.
   same home as the plugin data): `<root>/profiles/<name>` is `<name>`;
   otherwise `ctx.profile_name`, and, when that says `custom`, the home
   directory's name.
+- A claim file names its profile. A profile cloned with
+  `hermes profile create --clone-all` (which copies `plugin-data`) claims its
+  own persona the first time it speaks; a renamed profile keeps its persona
+  while no other profile holds it.
 - An 11th profile shares the least-used persona.
 
 Settings (`plugins.entries.onair.settings` in `config.yaml`):
