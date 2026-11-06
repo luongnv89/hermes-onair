@@ -73,14 +73,14 @@ def calls(monkeypatch, tmp_path):
     return seen
 
 
-def test_register_adds_the_cli_command_the_slash_command_and_the_tts_provider():
+def test_register_adds_the_cli_command_the_slash_command_the_tool_and_the_tts_provider():
     ctx = StrictContext()
     onair.register(ctx)
     assert [c["name"] for c in ctx.cli_commands] == ["onair"]
     (slash,) = ctx.commands
     assert slash["name"] == "onair" and callable(slash["handler"])
     assert slash["args_hint"] == commands.ARGS_HINT and "voice" in slash["description"]
-    assert ctx.tools == [] and ctx.hooks == []
+    assert ctx.tools == ["onair_episode"] and ctx.hooks == []
     assert callable(ctx.cli_commands[0]["handler_fn"])
     (provider,) = ctx.tts_providers
     assert isinstance(provider, router.OnAirTTS) and provider.name == "onair"
@@ -92,6 +92,7 @@ def test_register_touches_nothing_else():
             self.n = 0
             self.providers = []
             self.slash = []
+            self.tools = []
 
         def register_cli_command(self, **kwargs):
             self.n += 1
@@ -102,8 +103,18 @@ def test_register_touches_nothing_else():
         def register_tts_provider(self, provider):
             self.providers.append(provider)
 
+        def register_tool(self, name, toolset, schema, handler, **kwargs):
+            self.tools.append(name)
+
         def get_config(self, key, default=None):
             raise AssertionError("settings are read when they are used, not at register()")
+
+        @property
+        def llm(self):
+            raise AssertionError("ctx.llm is read when an episode is made, not at register()")
+
+        def post_message(self, text):
+            raise AssertionError("nothing is posted at register()")
 
         @property
         def profile_name(self):
@@ -112,6 +123,7 @@ def test_register_touches_nothing_else():
     ctx = Bare()
     onair.register(ctx)  # any other attribute access would raise AttributeError
     assert ctx.n == 1 and len(ctx.providers) == 1 and ctx.slash == ["onair"]
+    assert ctx.tools == ["onair_episode"]
 
 
 def test_the_provider_reads_settings_through_the_context(tmp_path, monkeypatch):

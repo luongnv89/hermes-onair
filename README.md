@@ -2,8 +2,9 @@
 On Air: free voices and two-host audio shows for Hermes Agent (Hermes plugin)
 
 > Status: early (v0.1.0). This release ships `hermes onair setup`, the free
-> voice router (`tts.provider: onair`) and a distinct voice per profile
-> (`/onair voice`); shows (`/onair` episodes) come next.
+> voice router (`tts.provider: onair`), a distinct voice per profile
+> (`/onair voice`) and two-host episodes (`/onair <link or text>` and the
+> `onair_episode` agent tool); the Agent Standup show comes next.
 
 ## Install
 
@@ -157,7 +158,58 @@ Settings (`plugins.entries.onair.settings` in `config.yaml`):
 | `sidecar_python` | `">=3.11"` | Python request for `uv venv --python`. |
 | `ffmpeg_bin` | `""` | A path (with `/` or a leading `~`) or a name looked up on `PATH`; empty looks on `PATH`, then for the newest `ffmpeg-*/bin/ffmpeg` in `$HERMES_HOME/tools`, then `~/.hermes/tools`. |
 | `language` | `auto` | Language of the text (`en`, `fr`, `vi`, …); `auto` detects en/fr/vi. |
-| `voices` | `{}` | Voice per engine and language, e.g. `{edge: {fr: fr-FR-HenriNeural}, heygen: {"*": tabitha}}`. |
+| `voices` | `{}` | Voice per engine and language, e.g. `{edge: {fr: fr-FR-HenriNeural}, heygen: {"*": tabitha}}`. Speech only: an episode's two hosts keep their personas' voices. |
+| `episode_minutes` | `1.0` | Target length of an `/onair` episode (0.5 to 5 minutes) when the request names none. |
+
+## Episodes: `/onair <link or text>` and `onair_episode`
+
+```text
+/onair https://science.nasa.gov/moon/facts/
+/onair --lang fr --minutes 2 <pasted text>
+```
+
+On Air replies at once ("recording…"), then about a minute later with the
+episode: a two-host MP3 (DropCast's `podcast-2host` show), its WebVTT
+transcript, the voices and timings, and a last line `MEDIA:/abs/path.mp3`
+that the gateway sends as an audio attachment. The agent tool
+`onair_episode` (`source`, `language`, `minutes`) runs the same pipeline and
+returns JSON with the `MEDIA:` path, the transcript, the engine, the model
+id and the timings.
+
+1. **Ingest**: DropCast reads the link (http/https only; a local path is
+   treated as text) or the text, and briefs the episode: the target length
+   (`--minutes`, else the `episode_minutes` setting, default 1), the language
+   (`--lang`, else the `language` setting, else detected from the source:
+   en, fr and vi are supported), no guests.
+2. **Script**: written by **your own configured model** through `ctx.llm`, so
+   its cost follows your model choice; On Air passes no model override and
+   records the model id the call returns. One retry with backoff; a hard cap
+   of about 150 spoken words per minute; lines must quote the source. When
+   the model fails (free models often answer HTTP 429), a built-in template
+   built from sentences of the source is used instead, and the reply says so.
+3. **Checks**: DropCast's own script checks (show order, fixed lines,
+   fact-check quotes, length). An LLM script that fails them is replaced by
+   the template.
+4. **Render**: one engine for the whole episode, never mixed: Fish (English
+   first) or HeyGen, OpenRouter's free models behind the price gate, when
+   `OPENROUTER_API_KEY` is set; otherwise edge-tts. Two hosts, two personas:
+   your profile's persona voices the host of its voice type, the next
+   persona of the other type voices the other host.
+5. **Deliver**: `episode.mp3` and `transcript.vtt` under
+   `$HERMES_HOME/plugin-data/onair/episodes/<stamp>/jobs/<job>/`, with
+   `onair.json` (engine, voices, script source, model id, timings).
+
+Episodes voiced by edge-tts are for your private listening only: the reply
+says so. Never publish them.
+
+**How the reply travels.** The "recording…" note goes through
+`ctx.post_message` where a session is bound (gateway chats, TUI/Desktop) and
+is edited to "recorded in N s" at the end; on the classic CLI, where nothing
+is bound, it is printed. The episode itself is the command's return value,
+because only a command's reply carries `MEDIA:` attachments (`post_message`
+sends text only, and `inject_message` queues a user turn for the agent).
+The handler is synchronous, so the gateway runs it on its worker pool and
+its event loop is never blocked.
 
 ## Develop
 

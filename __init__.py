@@ -4,6 +4,9 @@
 ``hermes onair setup``; ``tts.provider: onair`` routes Hermes's speech to the
 free voice router (:mod:`router`) in the active profile's persona
 (:mod:`personas`); ``/onair voice`` shows and changes it (:mod:`commands`).
+``/onair <link|text>`` and the ``onair_episode`` agent tool (:mod:`tool`)
+share one pipeline (:mod:`episode`) that turns a link or text into a
+two-host episode.
 """
 
 from __future__ import annotations
@@ -14,7 +17,7 @@ __version__ = "0.1.0"
 def register(ctx) -> None:
     # Imported here, not at module level: importing the package stays free of
     # side effects, and pytest can import this file on its own.
-    from . import cli, commands, router
+    from . import cli, commands, episode, router, tool
 
     def profile_name():
         # Read per call, never at register(): it follows HERMES_HOME and any
@@ -31,9 +34,26 @@ def register(ctx) -> None:
     ctx.register_tts_provider(
         router.OnAirTTS(ctx.get_config, cli.resolve_data_dir, profile_name=profile_name)
     )
+    def llm():
+        # ctx.llm is host-owned (the user's own model); read on use, never at register().
+        return ctx.llm
+
+    def post(text):
+        return ctx.post_message(text)
+
+    host = episode.Host(cli.resolve_data_dir, profile_name, ctx.get_config, llm)
     ctx.register_command(
         commands.COMMAND,
-        commands.make_handler(cli.resolve_data_dir, profile_name, ctx.get_config),
+        commands.make_handler(cli.resolve_data_dir, profile_name, ctx.get_config,
+                              host=host, post=post),
         description=commands.DESCRIPTION,
         args_hint=commands.ARGS_HINT,
+    )
+    ctx.register_tool(
+        name=tool.NAME,
+        toolset=tool.TOOLSET,
+        schema=tool.SCHEMA,
+        handler=tool.make_handler(host),
+        description=tool.DESCRIPTION,
+        emoji=tool.EMOJI,
     )

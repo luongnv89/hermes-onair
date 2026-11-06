@@ -8,7 +8,33 @@ the handler up with ``get_plugin_command_handler`` and call it through
 keywords the handler declares. This handler takes ``raw_args`` alone and
 returns the reply text.
 
-Subcommands (``/voice`` is a Hermes built-in, so they live under ``/onair``):
+``/onair <link|text>`` records a two-host episode (:mod:`episode`) and
+answers twice: at once with "recording…", then with the episode, a final
+reply that ends in a ``MEDIA:/abs/path.mp3`` line.
+
+How the two messages travel (documented choice):
+
+- The "recording…" note goes out through ``ctx.post_message``: it posts into
+  the conversation bound to the command (gateway chats and local
+  TUI/Desktop sessions) and returns a handle whose ``edit`` later turns it
+  into "recorded in N s". Where nothing is bound (the classic CLI REPL, or a
+  process with no live gateway) the post is refused with a result, never an
+  exception, and the note is printed instead (the CLI prints the handler's
+  output in the user's own terminal).
+- The episode is the handler's **return value**. Every surface sends a
+  command's reply through its normal path, which turns the ``MEDIA:`` line
+  into an audio attachment on the gateway (``extract_media``) and prints it
+  on the CLI. ``post_message`` sends text only (no attachments), and
+  ``inject_message`` queues a *user* turn for the agent (and on the gateway
+  needs ``allow_gateway_injection``), so neither can deliver the file.
+- Long work never blocks the gateway's event loop: this handler is
+  synchronous, and the gateway runs synchronous plugin handlers on its
+  worker pool with the session context carried
+  (``gateway/run_inbound_hooks.py`` ``_hm_run_plugin_handler``). An async
+  handler would run on the loop, and on the CLI an async handler's result
+  is awaited for at most 30 s, too short for an episode.
+
+Voice subcommands (``/voice`` is a Hermes built-in, so they live under ``/onair``):
 
 - ``/onair voice``: this profile's persona and its voices (claims one on first use);
 - ``/onair voice list``: the pool and which profile holds each persona;
@@ -21,16 +47,27 @@ The profile and its home are resolved on every call, as for speech.
 
 from __future__ import annotations
 
+import logging
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from . import personas, router
+from . import episode, personas, router
+
+log = logging.getLogger("onair")
 
 COMMAND = "onair"
-DESCRIPTION = "On Air: this profile's voice persona (voice, voice list, voice set <name>)"
-ARGS_HINT = "voice [list | set <name> [--force]]"
-USAGE = "usage: /onair voice | /onair voice list | /onair voice set <name> [--force]"
+DESCRIPTION = (
+    "On Air: turn a link or text into a two-host audio episode; "
+    "voice, voice list, voice set <name> for this profile's voice"
+)
+ARGS_HINT = "<link|text> | voice [list | set <name> [--force]]"
+USAGE = (
+    "usage: /onair [--lang en|fr|vi] [--minutes N] <link or text> | /onair voice | "
+    "/onair voice list | /onair voice set <name> [--force]"
+)
+RECORDING = "🎙️ On Air is recording your episode… (about a minute)"
 
 _ENGINE_LABEL = {"fish": "Fish", "heygen": "HeyGen", "edge": "edge-tts"}
 
@@ -108,17 +145,108 @@ def listing(held: dict[str, list[str]], profile: str) -> str:
     return "\n".join(lines)
 
 
+def parse_episode_args(raw_args: str) -> tuple[str, str | None, str | None]:
+    """``(source, language, minutes)`` from ``[--lang L] [--minutes N] <link or text>``.
+
+    Options are read only at the start, so a text may contain anything after them.
+    """
+    rest = (raw_args or "").strip()
+    language = minutes = None
+    while rest.startswith("--"):
+        head, _, tail = rest.partition(" ")
+        flag, _, inline = head.partition("=")
+        if flag not in ("--lang", "--minutes", "--min"):
+            break
+        value, _, after = (inline, "", tail) if inline else tail.strip().partition(" ")
+        if not value:
+            raise episode.EpisodeError(f"{flag} needs a value")
+        if flag == "--lang":
+            language = value
+        else:
+            minutes = value
+        rest = after.strip()
+    return rest, language, minutes
+
+
+def _is_voice_command(args: list[str]) -> bool:
+    if not args or args[0].lower() != "voice":
+        return False
+    return len(args) == 1 or args[1].lower() in ("list", "set")
+
+
+class _Announcer:
+    """The "recording…" note: ``post_message`` where a session is bound, else printed."""
+
+    def __init__(self, post: Callable[[str], Any] | None) -> None:
+        self._post = post
+        self._handle: Any = None
+
+    def start(self, text: str) -> None:
+        handle = None
+        if self._post is not None:
+            try:
+                handle = self._post(text)
+            except Exception:  # post_message never raises; a stand-in might
+                handle = None
+        if handle is not None and getattr(handle, "ok", False):
+            self._handle = handle
+            return
+        print(text, file=sys.stderr, flush=True)
+
+    def finish(self, text: str) -> None:
+        if self._handle is None:
+            return
+        try:
+            self._handle.edit(text)
+        except Exception:
+            log.debug("onair: could not edit the recording note", exc_info=True)
+
+
+def episode_reply(host: episode.Host, raw_args: str,
+                  post: Callable[[str], Any] | None = None) -> str:
+    """Record an episode for ``/onair <link|text>``; the reply ends with ``MEDIA:``."""
+    try:
+        source, language, minutes = parse_episode_args(raw_args)
+        request = host.request(source, language, minutes)
+    except episode.EpisodeError as exc:
+        return f"On Air: {exc}.\n{USAGE}"
+    note = _Announcer(post)
+    note.start(RECORDING)
+    try:
+        made = host.record(request)
+    except episode.EpisodeError as exc:
+        note.finish("🎙️ On Air: no episode this time.")
+        return f"On Air could not record this episode: {exc}"
+    except Exception as exc:
+        log.exception("onair: episode failed")
+        note.finish("🎙️ On Air: no episode this time.")
+        return f"On Air could not record this episode (internal error: {type(exc).__name__})."
+    note.finish(f"🎙️ On Air: recorded in {made.timings.get('total_s', 0):.0f} s.")
+    return episode.reply(made)
+
+
 def make_handler(
     data_dir: Callable[[], Path],
     profile_name: Callable[[], Any] | None = None,
     get_config: Callable[..., Any] | None = None,
+    *,
+    host: episode.Host | None = None,
+    post: Callable[[str], Any] | None = None,
 ) -> Callable[[str], str]:
-    """The ``/onair`` handler, ``fn(raw_args) -> reply``; everything is read per call."""
+    """The ``/onair`` handler, ``fn(raw_args) -> reply``; everything is read per call.
+
+    *host* binds the episode pipeline (None: only the voice subcommands);
+    *post* is ``ctx.post_message``.
+    """
 
     def handle(raw_args: str = "") -> str:
         args = (raw_args or "").split()
-        if not args or args[0].lower() != "voice":
+        if not args:
             return USAGE
+        if not _is_voice_command(args):
+            if host is None:
+                return USAGE
+            return episode_reply(host, raw_args, post)
         directory = Path(data_dir())
         home = router.active_hermes_home(directory)
         try:
