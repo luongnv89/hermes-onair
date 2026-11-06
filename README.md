@@ -159,7 +159,7 @@ Settings (`plugins.entries.onair.settings` in `config.yaml`):
 | `ffmpeg_bin` | `""` | A path (with `/` or a leading `~`) or a name looked up on `PATH`; empty looks on `PATH`, then for the newest `ffmpeg-*/bin/ffmpeg` in `$HERMES_HOME/tools`, then `~/.hermes/tools`. |
 | `language` | `auto` | Language of the text (`en`, `fr`, `vi`, …); `auto` detects en/fr/vi. |
 | `voices` | `{}` | Voice per engine and language, e.g. `{edge: {fr: fr-FR-HenriNeural}, heygen: {"*": tabitha}}`. Speech only: an episode's two hosts keep their personas' voices. |
-| `episode_minutes` | `1.0` | Target length of an `/onair` episode (0.5 to 5 minutes) when the request names none. |
+| `episode_minutes` | `1.0` | Target length of an `/onair` episode (1 to 5 minutes) when the request names none. |
 
 ## Episodes: `/onair <link or text>` and `onair_episode`
 

@@ -46,7 +46,7 @@ SCHEMA: dict[str, Any] = {
             },
             "minutes": {
                 "type": "number",
-                "description": "Target length in minutes, 0.5 to 5 (default 1).",
+                "description": "Target length in minutes, 1 to 5 (default 1).",
                 "minimum": episode.MIN_MINUTES,
                 "maximum": episode.MAX_MINUTES,
             },

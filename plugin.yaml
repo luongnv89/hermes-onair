@@ -67,6 +67,6 @@ config_schema:
     type: float
     default: 1.0
     description: >-
-      Target length of an `/onair` episode in minutes (0.5 to 5), when the
+      Target length of an `/onair` episode in minutes (1 to 5), when the
       request names none. The script is capped at about 150 spoken words
       per minute of it.

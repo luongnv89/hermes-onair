@@ -47,7 +47,7 @@ from . import adapter, openrouter, personas, router, sidecar, writer
 log = logging.getLogger("onair")
 
 DEFAULT_MINUTES = 1.0
-MIN_MINUTES = 0.5
+MIN_MINUTES = 1.0  # the show's fixed lines alone fill about half a minute
 MAX_MINUTES = 5.0
 EPISODES_DIR = "episodes"
 RECORD_FILE = "onair.json"

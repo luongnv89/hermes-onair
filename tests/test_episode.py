@@ -639,3 +639,11 @@ def test_the_first_question_asks_for_the_idea_when_there_is_no_thesis():
     draft = writer.template_draft(brief(), source(two))
     main = [t for t in draft.turns if t.part == "main"]
     assert main[0].text == writer.PHRASES["en"]["first_q"]
+
+
+def test_the_shortest_episode_still_fits_an_llm_script():
+    b = brief("en", episode.MIN_MINUTES)
+    draft = writer.compose(good_llm_json(), b, source(), model=MODEL)
+    assert draft.source == "llm" and draft.words <= writer.word_cap(b)
+    with pytest.raises(episode.EpisodeError):
+        episode.make_request("text", None, episode.MIN_MINUTES - 0.1)
