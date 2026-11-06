@@ -38,9 +38,10 @@ file and ``os.replace``) to that profile's own
 survives restarts and later profiles never move it.
 
 **Sharing.** Claims are shared by **scanning the sibling profiles' claim
-files**, read-only. Siblings are the homes of the same Hermes root:
-the root itself (the ``default`` profile) and every ``<root>/profiles/<name>``.
-No other profile's file is ever written.
+files**, read-only (the claim file itself is never followed). Siblings are
+the homes of the same Hermes root: the root itself (the ``default``
+profile) and every ``<root>/profiles/<name>``. No other profile's file is
+ever written.
 
 **Races.** Two profiles claiming at once would both see the same free
 persona. A claim therefore runs under an exclusive ``flock`` on the root
@@ -225,7 +226,13 @@ def root_of(home: Path) -> Path:
 
 
 def profile_homes(root: Path) -> list[Path]:
-    """The root and every ``<root>/profiles/<name>`` (no dot-names, no symlinks)."""
+    """The root and every ``<root>/profiles/<name>``.
+
+    Dot-names are skipped, and so is a ``profiles/<name>`` entry that is itself
+    a symlink. Directories below a profile home (``plugin-data``, ``onair``)
+    are not checked: only the claim file itself is never followed
+    (:func:`inspect_record`).
+    """
     homes = [root]
     with contextlib.suppress(OSError):
         for entry in sorted((root / "profiles").iterdir()):
@@ -279,8 +286,11 @@ def read_record(path: Path) -> dict[str, Any] | None:
 def inspect_record(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     """``(record, None)``, ``(None, None)`` when there is no file, or ``(None, reason)``.
 
-    Opened without blocking (a FIFO is not a file), and read only when it is
-    a small regular file.
+    The claim file itself is never followed (``O_NOFOLLOW`` on its last
+    component: a symlink there is rejected); directories on the way to it
+    may be symlinks and are followed. Opened without blocking (a FIFO is not
+    a file), and read only when it is a small regular file. Only a persona id
+    is ever taken from it.
     """
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
