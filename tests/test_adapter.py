@@ -100,16 +100,32 @@ def test_parse_result_accepts_every_contract_status(status):
     assert result.raw["version"] == 1
 
 
-def test_status_sets_partition_the_contract():
+def test_status_sets_follow_the_contract():
     assert {s.value for s in JobStatus} == {
         "needs_agent", "needs_approval", "rendering", "delivered", "stopped", "failed",
     }
-    assert {s for s in JobStatus if s.terminal} == {
-        JobStatus.DELIVERED, JobStatus.STOPPED, JobStatus.FAILED,
-    }
+    assert {s for s in JobStatus if s.terminal} == {JobStatus.DELIVERED, JobStatus.STOPPED}
     needs_input = {s for s in JobStatus if s.needs_input}
     assert needs_input == {JobStatus.NEEDS_AGENT, JobStatus.NEEDS_APPROVAL}
     assert not JobStatus.RENDERING.terminal and not JobStatus.RENDERING.needs_input
+    # Only a delivered job is beyond a resume.
+    assert {s for s in JobStatus if not s.resumable} == {JobStatus.DELIVERED}
+
+
+def test_failed_is_resumable_not_terminal():
+    # The pinned DropCast's run.py:2335-2344: a failed step's next is `dropcast resume JOB`.
+    failed = adapter.parse_result(
+        result_json("failed", step="render", next="dropcast resume /data/jobs/2026-11-05-abc")
+    )
+    assert not failed.status.terminal
+    assert failed.status.resumable and failed.resumable
+
+
+def test_a_failed_ingest_without_a_job_is_not_resumable():
+    result = adapter.parse_result(
+        result_json("failed", step="ingest", job=None, next="dropcast run https://x")
+    )
+    assert result.status.resumable and not result.resumable
 
 
 def test_parse_result_reads_a_delivered_reply():
@@ -134,11 +150,38 @@ def test_parse_result_skips_stray_lines_before_the_json():
         (json.dumps({"status": "delivered"}), "lacks"),
         (result_json("exploded"), "unknown DropCast status"),
         (result_json("delivered", reply="text"), "malformed reply"),
+        (result_json(version=2), "unsupported DropCast result version: 2"),
+        (result_json(version="1"), "unsupported DropCast result version"),
+        (result_json(version=True), "unsupported DropCast result version"),
+        (result_json(step="mix"), "unknown DropCast step"),
+        (result_json(job=7), "malformed job"),
+        (result_json(next=["dropcast", "resume"]), "malformed next"),
+        (result_json(message=""), "malformed message"),
+        (result_json(reply={"text": "hi", "attachments": []}), "malformed reply"),
+        (result_json(reply={"adapter": "headless", "attachments": []}), "malformed reply"),
+        (result_json(reply={"adapter": "headless", "text": ""}), "malformed reply"),
+        (result_json(reply={"adapter": "h", "text": "t", "attachments": "a"}), "malformed reply"),
+        (result_json(reply={"adapter": "h", "text": "t", "attachments": [""]}), "malformed reply"),
+        (result_json(steps=[]), "malformed steps or request"),
+        (result_json(request=None), "malformed steps or request"),
+        (result_json(notes="n"), "malformed notes"),
+        (result_json(notes=[1]), "malformed notes"),
     ],
 )
 def test_parse_result_rejects_output_outside_the_contract(stdout, message):
     with pytest.raises(AdapterError, match=message):
         adapter.parse_result(stdout)
+
+
+@pytest.mark.parametrize(
+    "key", ["version", "status", "step", "job", "message", "reply", "next", "steps", "request",
+            "notes"],
+)
+def test_parse_result_requires_every_schema_key(key):
+    data = json.loads(result_json())
+    del data[key]
+    with pytest.raises(AdapterError, match=f"lacks: {key}"):
+        adapter.parse_result(json.dumps(data))
 
 
 # --- run / resume ---
@@ -161,15 +204,26 @@ def test_run_argv_is_headless_free_and_unpublished(tmp_path):
     _safe(argv)
 
 
-def test_run_argv_passes_text_as_one_flag(tmp_path):
+def test_run_argv_reads_text_from_stdin_never_argv(tmp_path):
     argv = adapter.build_run_argv(tmp_path, Path("/r"), text="--looks like a flag")
-    assert argv[-1] == "--text=--looks like a flag"
+    assert argv[-2:] == ["--text", "-"]
+    assert "--looks like a flag" not in " ".join(argv)
     _safe(argv)
+
+
+def test_run_pipes_text_to_stdin_whatever_its_size(tmp_path):
+    text = "word " * 100_000  # 500 KB: far above Linux's 128 KiB per-argument cap
+    runner = FakeRunner().on(lambda a: a[1] == "run", done(1, result_json()))
+    adapter.run(tmp_path, Path("/r"), text=text, runner=runner, env={})
+    call = runner.calls[0]
+    assert call["input"] == text
+    assert "stdin" not in call  # subprocess.run refuses stdin= together with input=
+    assert max(len(a) for a in call["argv"]) < 1000
 
 
 @pytest.mark.parametrize(
     "kwargs",
-    [{}, {"link": "a", "text": "b"}, {"link": ""}, {"text": "  "}, {"link": "-"}, {"text": "-"}],
+    [{}, {"link": "a", "text": "b"}, {"link": ""}, {"text": "  "}, {"link": "-"}],
 )
 def test_run_argv_refuses_bad_sources(tmp_path, kwargs):
     with pytest.raises(AdapterError):
@@ -210,6 +264,7 @@ def test_run_parses_exit_0_and_1(tmp_path, code, status):
     call = runner.calls[0]
     assert call["env"] == {"PATH": "/bin", "DROPCAST_PUBLISH": "0"}
     assert call["stdin"] is subprocess.DEVNULL
+    assert "input" not in call
     assert call["check"] is False
 
 
@@ -226,6 +281,22 @@ def test_usage_error_raises_with_the_last_stderr_line(tmp_path):
         adapter.run(tmp_path, Path("/r"), link="x", runner=runner, env={})
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        PermissionError(13, "Permission denied"),
+        OSError(7, "Argument list too long"),  # E2BIG
+        OSError(8, "Exec format error"),
+    ],
+)
+def test_other_os_errors_are_adapter_errors(tmp_path, error):
+    runner = FakeRunner().on(lambda a: True, error)
+    with pytest.raises(AdapterError, match=f"could not start: {error.strerror}"):
+        adapter.run(tmp_path, Path("/r"), link="x", runner=runner, env={})
+    with pytest.raises(AdapterError, match="could not start"):
+        adapter.resume(tmp_path, "j", Path("/r"), runner=runner, env={})
+
+
 def test_missing_executable_and_timeout_are_adapter_errors(tmp_path):
     runner = FakeRunner().on(lambda a: True, FileNotFoundError("dropcast"))
     with pytest.raises(AdapterError, match="hermes onair setup"):
@@ -233,3 +304,46 @@ def test_missing_executable_and_timeout_are_adapter_errors(tmp_path):
     runner = FakeRunner().on(lambda a: True, subprocess.TimeoutExpired("dropcast", 1))
     with pytest.raises(AdapterError, match="did not answer"):
         adapter.resume(tmp_path, "j", Path("/r"), runner=runner, env={})
+
+
+# --- smoke (every engine process starts from adapter.py) ---
+
+
+def test_smoke_runs_help_with_the_scrubbed_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "x")
+    runner = FakeRunner().on(lambda a: True, done(0))
+    assert adapter.smoke(tmp_path, runner) == (True, "ok")
+    call = runner.calls[0]
+    assert call["argv"] == adapter.smoke_argv(tmp_path)
+    assert "ELEVENLABS_API_KEY" not in call["env"] and call["env"]["DROPCAST_PUBLISH"] == "0"
+    assert call["stdin"] is subprocess.DEVNULL
+
+
+@pytest.mark.parametrize(
+    ("respond", "detail"),
+    [
+        (done(3), "exit 3"),
+        (subprocess.TimeoutExpired("dropcast", 1), "no answer within"),
+        (PermissionError(13, "Permission denied"), "could not start: PermissionError"),
+        (FileNotFoundError(2, "No such file"), "could not start: FileNotFoundError"),
+    ],
+)
+def test_smoke_reports_failures_without_raising(tmp_path, respond, detail):
+    ok, text = adapter.smoke(tmp_path, FakeRunner().on(lambda a: True, respond))
+    assert not ok and text.startswith(detail)
+
+
+def test_installed_commit_needs_the_dropcast_repo_url(tmp_path):
+    write_install(tmp_path, PINNED_SHA)
+    record = next(tmp_path.glob("lib/*/site-packages/dropcast-*.dist-info/direct_url.json"))
+    data = json.loads(record.read_text())
+    for url in (
+        "ssh://git@github.com/luongnv89/dropcast.git",
+        "git+ssh://git@github.com/luongnv89/dropcast/",
+    ):
+        data["url"] = url
+        record.write_text(json.dumps(data))
+        assert adapter.installed_commit(tmp_path) == PINNED_SHA, url
+    data["url"] = "ssh://git@github.com/someone-else/dropcast"
+    record.write_text(json.dumps(data))
+    assert adapter.installed_commit(tmp_path) is None
