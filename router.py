@@ -24,9 +24,11 @@ engine or a failed write leaves ``output_path`` untouched. A write error
 stops the request instead of trying the next engine. Hermes passes a temporary path there and
 renames it, so nothing may be keyed by that path.
 
-Voices: one default per engine and language, overridable with the plugin
-setting ``voices`` (``{engine: {language or "*": voice}}``) or, for one
-engine, with ``tts.voice: <engine>:<voice>``. Per-profile personas come later.
+Voices, first match wins: ``tts.voice: <engine>:<voice>`` for that engine;
+the plugin setting ``voices`` (``{engine: {language or "*": voice}}``); the
+active profile's persona (:mod:`personas`, claimed on first use); the
+defaults below. A persona with no voice for an engine (3 personas have no
+Fish voice) skips that engine unless a setting or ``tts.voice`` names one.
 """
 
 from __future__ import annotations
@@ -47,7 +49,7 @@ from typing import Any
 
 from agent.tts_provider import TTSProvider
 
-from . import adapter, openrouter, sidecar
+from . import adapter, openrouter, personas, sidecar
 
 log = logging.getLogger("onair")
 
@@ -158,18 +160,34 @@ def chain_for(language: str) -> tuple[str, ...]:
     return CHAIN_EN if language.split("-", 1)[0] == "en" else CHAIN_OTHER
 
 
-def voice_for(engine: str, language: str, overrides: Any = None) -> str:
-    """The voice for *engine* in *language*: plugin setting first, then the default."""
-    base = language.split("-", 1)[0]
-    for table in (overrides if isinstance(overrides, Mapping) else {}, DEFAULT_VOICES):
-        voices = table.get(engine)
-        if not isinstance(voices, Mapping):
-            continue
-        for key in (language, base, "*"):
-            value = voices.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-    return DEFAULT_VOICES[engine]["*"]
+def _lookup(table: Any, engine: str, language: str) -> str | None:
+    voices = table.get(engine) if isinstance(table, Mapping) else None
+    if not isinstance(voices, Mapping):
+        return None
+    for key in (language, language.split("-", 1)[0], "*"):
+        value = voices.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def voice_for(
+    engine: str, language: str, overrides: Any = None, persona: personas.Persona | None = None
+) -> str | None:
+    """The voice for *engine* in *language*: plugin setting, then *persona*, then the default.
+
+    None only when *persona* has no voice for *engine* and no setting names
+    one: the engine is skipped for this persona.
+    """
+    found = _lookup(overrides, engine, language)
+    if found is None and persona is not None:
+        table = persona.voices()
+        if engine not in table:
+            return None
+        found = _lookup(table, engine, language)
+    if found is None:
+        found = _lookup(DEFAULT_VOICES, engine, language)
+    return found or DEFAULT_VOICES[engine]["*"]
 
 
 def pinned_voice(voice: Any) -> tuple[str, str] | None:
@@ -438,6 +456,7 @@ def speak(
     fmt: str = DEFAULT_FORMAT,
     voices: Any = None,
     pinned: tuple[str, str] | None = None,
+    persona: personas.Persona | None = None,
 ) -> str:
     """Speak *text* into *output_path* with the first engine that works; return the engine.
 
@@ -450,10 +469,16 @@ def speak(
     fmt = fmt if fmt in FORMATS else DEFAULT_FORMAT
     key = openrouter.api_key(env.environ)
     out = Path(output_path)
+    who = f" as {persona.id}" if persona is not None else ""
     for engine in chain_for(language):
-        voice = voice_for(engine, language, voices)
+        voice = voice_for(engine, language, voices, persona)
         if pinned and pinned[0] == engine:
             voice = pinned[1]
+        if voice is None:  # the persona has no voice here (no Fish voice): skip it
+            reason = f"persona {persona.id} has no {engine} voice"
+            env.attempts.append({"engine": engine, "voice": "", "error": reason})
+            log.info("%s skipped: %s", engine, reason)
+            continue
         with tempfile.TemporaryDirectory(prefix="onair-") as tmp:
             work = Path(tmp)
             try:
@@ -476,7 +501,7 @@ def speak(
                 env.attempts.append({"engine": engine, "voice": voice, "error": str(exc)})
                 raise
         env.attempts.append({"engine": engine, "voice": voice, "error": ""})
-        log.info("spoke %d chars with %s (%s, %s)", len(text), engine, voice, language)
+        log.info("spoke %d chars with %s (%s, %s)%s", len(text), engine, voice, language, who)
         return engine
     detail = "; ".join(f"{a['engine']}: {a['error']}" for a in env.attempts)
     raise AllEnginesFailed(f"no free voice engine could speak this: {detail}")
@@ -512,9 +537,11 @@ class OnAirTTS(TTSProvider):
         http: openrouter.Http = openrouter.urllib_http,
         runner: Runner = subprocess.run,
         which: Which = shutil.which,
+        profile_name: Callable[[], Any] | None = None,
     ) -> None:
         self._get_config = get_config
         self._data_dir = data_dir
+        self._profile_name = profile_name
         self._http = http
         self._runner = runner
         self._which = which
@@ -564,14 +591,17 @@ class OnAirTTS(TTSProvider):
     ) -> str:
         fmt = (format or DEFAULT_FORMAT).strip().lower()
         data_dir = Path(self._data_dir())
+        home = active_hermes_home(data_dir)
         ffmpeg = find_ffmpeg(
             self._setting("ffmpeg_bin", DEFAULT_FFMPEG_BIN), self._which,
-            environ={}, hermes_home=active_hermes_home(data_dir),
+            environ={}, hermes_home=home,
         )
+        claim = personas.safe_claim(data_dir, self._profile_name, home)
         env = Environment(data_dir=data_dir, ffmpeg=ffmpeg, http=self._http, runner=self._runner)
         language = resolve_language(self._setting("language", DEFAULT_LANGUAGE), text)
         speak(
             text, output_path, env=env, language=language, fmt=fmt,
             voices=self._setting("voices", {}), pinned=pinned_voice(voice),
+            persona=claim.persona if claim is not None else None,
         )
         return str(output_path)

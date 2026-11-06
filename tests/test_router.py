@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from onair import adapter, openrouter, router
+from onair import adapter, openrouter, personas, router
 
 from fakes import (
     FREE,
@@ -47,6 +47,9 @@ def key(monkeypatch):
 def data_dir(tmp_path):
     path = tmp_path / "plugin-data" / "onair"
     write_install(path / "sidecar")  # an On Air sidecar (marker + pinned install)
+    # A fixed persona claim, so provider tests never depend on tmp_path's name. Bob's
+    # English voices are the defaults (Ethan, lucian, en-US-AndrewNeural).
+    personas.write_record(path / personas.CLAIM_FILE, {"persona": "bob", "profile": "test"})
     return path
 
 
@@ -874,3 +877,138 @@ def test_managed_ffmpeg_prefers_a_given_home_over_the_env(tmp_path):
     environ = {"HERMES_HOME": str(tmp_path / "env-home")}
     assert router.managed_ffmpeg(home=tmp_path / "nohome", environ=environ,
                                  hermes_home=tmp_path / "given") == given
+
+
+# ------------------------------------------------- issue #5: profile personas
+
+MAYA = personas.BY_ID["maya"]
+BRAM = personas.BY_ID["bram"]  # one of the 3 personas with no Fish voice
+
+
+def posted_voices(http):
+    return [(c["url"], json.loads(c["body"])["voice"]) for c in http.calls if c["method"] == "POST"]
+
+
+def test_the_persona_voices_fish_first(tmp_path, data_dir, key):
+    http = FakeHttp(speech={FISH: audio(MP3_BYTES)})
+    speak(tmp_path, environment(data_dir, http), persona=MAYA)
+    assert [v for _, v in posted_voices(http)] == [personas.FISH_VOICES["Laura"]]
+
+
+def test_the_persona_voices_heygen_after_fish_fails(tmp_path, data_dir, key):
+    http = FakeHttp(speech={FISH: status(500), HEYGEN: audio(PCM_BYTES, "audio/pcm")})
+    speak(tmp_path, environment(data_dir, http), persona=MAYA)
+    assert [v for _, v in posted_voices(http)] == [personas.FISH_VOICES["Laura"], "meredith"]
+
+
+@pytest.mark.parametrize(("text", "language", "voice"), [
+    (EN, "en", "en-GB-SoniaNeural"), (FR, "fr", "fr-CH-ArianeNeural"),
+    ("Xin chào, hôm nay trời đẹp quá.", "vi", "pt-BR-ThalitaMultilingualNeural"),
+    ("Guten Tag.", "de", "de-DE-KatjaNeural"),  # no persona voice: the default
+])
+def test_the_persona_voices_edge_per_language(tmp_path, data_dir, text, language, voice):
+    seen = {}
+
+    def edge(argv):
+        seen["argv"] = argv
+        return edge_ok(argv)
+
+    env = environment(data_dir, FakeHttp(), runner(edge=edge))
+    speak(tmp_path, env, text=text, language=language, persona=MAYA)
+    assert f"host={voice}" in seen["argv"]
+
+
+def test_a_persona_without_a_fish_voice_skips_fish(tmp_path, data_dir, key):
+    http = FakeHttp(speech={HEYGEN: audio(PCM_BYTES, "audio/pcm")})
+    env = environment(data_dir, http)
+    engine, _ = speak(tmp_path, env, persona=BRAM)
+    assert engine == "heygen"
+    assert posted_voices(http) == [(openrouter.SPEECH_URL, "bram")]
+    assert env.attempts[0] == {"engine": "fish", "voice": "",
+                               "error": "persona bram has no fish voice"}
+
+
+def test_settings_win_over_the_persona(tmp_path, data_dir, key):
+    http = FakeHttp(speech={FISH: status(500), HEYGEN: audio(PCM_BYTES, "audio/pcm")})
+    voices = {"fish": {"en": "my-fish-voice"}, "heygen": {"*": "tabitha"}}
+    speak(tmp_path, environment(data_dir, http), voices=voices, persona=MAYA)
+    assert [v for _, v in posted_voices(http)] == ["my-fish-voice", "tabitha"]
+
+
+def test_a_setting_or_pin_brings_fish_back_for_a_persona_without_one(tmp_path, data_dir, key):
+    http = FakeHttp(speech={FISH: audio(MP3_BYTES)})
+    speak(tmp_path, environment(data_dir, http), voices={"fish": {"*": "abc"}}, persona=BRAM)
+    http2 = FakeHttp(speech={FISH: audio(MP3_BYTES)})
+    speak(tmp_path, environment(data_dir, http2), pinned=("fish", "def"), persona=BRAM)
+    assert [v for _, v in posted_voices(http)] == ["abc"]
+    assert [v for _, v in posted_voices(http2)] == ["def"]
+
+
+def test_a_pinned_voice_wins_over_the_persona(tmp_path, data_dir, key):
+    http = FakeHttp(speech={FISH: status(500), HEYGEN: audio(PCM_BYTES, "audio/pcm")})
+    speak(tmp_path, environment(data_dir, http), pinned=("heygen", "weston"), persona=MAYA)
+    assert [v for _, v in posted_voices(http)] == [personas.FISH_VOICES["Laura"], "weston"]
+
+
+@pytest.mark.parametrize(
+    ("engine", "language", "overrides", "persona", "want"),
+    [
+        ("fish", "en", None, "maya", "e3cd384158934cc9a01029cd7d278634"),
+        ("fish", "vi", None, "maya", "e3cd384158934cc9a01029cd7d278634"),
+        ("fish", "en", None, "bram", None),
+        ("fish", "en", {"fish": {"en": "x"}}, "bram", "x"),
+        ("heygen", "fr", None, "theo", "vincent"),
+        ("heygen", "fr", {"heygen": {"*": "nadine"}}, "theo", "nadine"),
+        ("edge", "fr-CA", None, "theo", "fr-CA-ThierryNeural"),
+        ("edge", "fr", {"edge": {"fr": "fr-FR-HenriNeural"}}, "theo", "fr-FR-HenriNeural"),
+        ("edge", "es", None, "theo", "es-ES-ElviraNeural"),
+        ("edge", "xx", None, "theo", "en-US-EmmaMultilingualNeural"),
+    ],
+)
+def test_voice_for_with_a_persona(engine, language, overrides, persona, want):
+    got = router.voice_for(engine, language, overrides, personas.BY_ID[persona])
+    assert got == want
+
+
+def profile_home(root, name):
+    data = root / "profiles" / name / "plugin-data" / "onair"
+    write_install(data / "sidecar")
+    return data
+
+
+def test_each_profile_speaks_in_its_own_claimed_voice(tmp_path):
+    root = tmp_path / "root"
+    current = {}
+    voices = {}
+
+    def edge(argv):
+        voices[current["name"]] = next(a for a in argv if a.startswith("host="))
+        return edge_ok(argv)
+
+    run = runner(edge=edge)
+    dirs = {n: profile_home(root, n) for n in ("forge", "mail", "travel")}
+    tts = router.OnAirTTS(Config(), lambda: dirs[current["name"]], http=FakeHttp(), runner=run,
+                          which=lambda name: None, profile_name=lambda: "custom")
+    for _ in range(2):  # the second round reads the stored claims
+        for name in dirs:
+            current["name"] = name
+            tts.synthesize(EN, str(tmp_path / f"{name}.mp3"))
+    assert len(set(voices.values())) == 3, voices
+    for name, data in dirs.items():
+        record = json.loads((data / personas.CLAIM_FILE).read_text())
+        assert record["profile"] == name
+        assert voices[name] == f"host={personas.BY_ID[record['persona']].edge['en']}"
+
+
+def test_a_broken_claim_never_stops_speech(tmp_path, data_dir, monkeypatch):
+    monkeypatch.setattr(personas, "claim", lambda *a: (_ for _ in ()).throw(RuntimeError("x")))
+    tts = router.OnAirTTS(Config(), lambda: data_dir, http=FakeHttp(), runner=runner(),
+                          which=lambda n: None, profile_name=lambda: "custom")
+    out = tmp_path / "x.mp3"
+    assert tts.synthesize(EN, str(out)) == str(out) and out.read_bytes() == EDGE_MP3
+
+
+def test_the_log_names_the_voice_and_the_persona(tmp_path, data_dir, caplog):
+    caplog.set_level(logging.INFO, logger="onair")
+    speak(tmp_path, environment(data_dir, FakeHttp()), persona=MAYA)
+    assert "with edge (en-GB-SoniaNeural, en) as maya" in caplog.text

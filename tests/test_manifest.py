@@ -59,6 +59,9 @@ def test_provides_match_what_register_registers():
     assert MANIFEST.get("provides_tools", []) == ctx.tools == []
     assert MANIFEST.get("provides_hooks", []) == ctx.hooks == []
     assert [c["name"] for c in ctx.cli_commands] == ["onair"]
+    # Hermes has no provides_* key for slash commands either; the description names it.
+    assert [c["name"] for c in ctx.commands] == ["onair"]
+    assert "/onair voice" in MANIFEST["description"]
     # Hermes has no provides_* key for TTS providers; the description names it.
     assert [p.name for p in ctx.tts_providers] == ["onair"]
     assert "tts.provider: onair" in MANIFEST["description"]
