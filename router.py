@@ -16,8 +16,10 @@ skipped. edge-tts runs in the sidecar through :mod:`adapter` (rule 4); its
 audio is for private use only (rule 3).
 
 The audio is written to ``output_path`` and nowhere else: scratch work goes
-to a temporary directory that is removed afterwards, and a failed engine
-leaves ``output_path`` untouched. Hermes passes a temporary path there and
+to a temporary directory that is removed afterwards, and the result reaches
+``output_path`` through a temp file beside it and ``os.replace``, so a failed
+engine or a failed write leaves ``output_path`` untouched. A write error
+stops the request instead of trying the next engine. Hermes passes a temporary path there and
 renames it, so nothing may be keyed by that path.
 
 Voices: one default per engine and language, overridable with the plugin
@@ -27,6 +29,7 @@ engine, with ``tts.voice: <engine>:<voice>``. Per-profile personas come later.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
@@ -113,6 +116,14 @@ class EngineError(Exception):
 
 class AllEnginesFailed(RuntimeError):
     """No engine could speak the request; the message lists each engine's reason."""
+
+
+class OutputWriteError(RuntimeError):
+    """An engine spoke, but its audio could not be written to ``output_path``.
+
+    Not an engine failure: the next engine would hit the same disk, so the
+    request stops here and ``output_path`` is left as it was.
+    """
 
 
 # ------------------------------------------------------------------ settings
@@ -302,6 +313,29 @@ def render_edge(
     return out
 
 
+def deliver(made: Path, out: Path) -> None:
+    """Put *made* at *out* atomically: a temp file beside *out*, then ``os.replace``.
+
+    On any error the temp file is removed, *out* is untouched, and
+    :class:`OutputWriteError` is raised.
+    """
+    tmp: str | None = None
+    try:
+        fd, tmp = tempfile.mkstemp(prefix=f".{out.name}.", suffix=".part", dir=out.parent)
+        with os.fdopen(fd, "wb") as dst, open(made, "rb") as src:
+            shutil.copyfileobj(src, dst)
+        os.replace(tmp, out)
+        tmp = None
+    except OSError as exc:
+        raise OutputWriteError(
+            f"cannot write the audio to {out}: {exc.strerror or type(exc).__name__}"
+        ) from None
+    finally:
+        if tmp is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+
+
 def _call(env: Environment, engine: str, text: str, voice: str, response_format: str):
     try:
         return openrouter.speech(
@@ -324,7 +358,9 @@ def speak(
 ) -> str:
     """Speak *text* into *output_path* with the first engine that works; return the engine.
 
-    Raises :class:`AllEnginesFailed` when none does; *output_path* is then untouched.
+    Raises :class:`AllEnginesFailed` when none does, and :class:`OutputWriteError`
+    (without trying another engine) when the audio cannot be written; in both
+    cases *output_path* is untouched.
     """
     if not text or not text.strip():
         raise ValueError("nothing to speak: empty text")
@@ -335,9 +371,9 @@ def speak(
         voice = voice_for(engine, language, voices)
         if pinned and pinned[0] == engine:
             voice = pinned[1]
-        try:
-            with tempfile.TemporaryDirectory(prefix="onair-") as tmp:
-                work = Path(tmp)
+        with tempfile.TemporaryDirectory(prefix="onair-") as tmp:
+            work = Path(tmp)
+            try:
                 if engine == FISH:
                     made = render_fish(env, text, voice, work, fmt)
                 elif engine == HEYGEN:
@@ -346,12 +382,16 @@ def speak(
                     made = render_edge(env, text, voice, language, work, fmt)
                 if made.stat().st_size == 0:
                     raise EngineError("empty audio")
-                shutil.copyfile(made, out)
-        except (EngineError, OSError) as exc:
-            reason = openrouter.scrub(str(exc), key)
-            env.attempts.append({"engine": engine, "voice": voice, "error": reason})
-            log.warning("%s could not speak (%s); trying the next engine", engine, reason)
-            continue
+            except (EngineError, OSError) as exc:
+                reason = openrouter.scrub(str(exc), key)
+                env.attempts.append({"engine": engine, "voice": voice, "error": reason})
+                log.warning("%s could not speak (%s); trying the next engine", engine, reason)
+                continue
+            try:
+                deliver(made, out)  # a write error stops the request: no next engine
+            except OutputWriteError as exc:
+                env.attempts.append({"engine": engine, "voice": voice, "error": str(exc)})
+                raise
         env.attempts.append({"engine": engine, "voice": voice, "error": ""})
         log.info("spoke %d chars with %s (%s, %s)", len(text), engine, voice, language)
         return engine

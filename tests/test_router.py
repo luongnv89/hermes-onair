@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import http.client
 import json
 import logging
@@ -585,3 +586,88 @@ def test_is_available_without_network(tmp_path, data_dir, monkeypatch):
 
     monkeypatch.delenv("OPENROUTER_API_KEY")
     assert router.OnAirTTS(Config(), boom).is_available() is False
+
+
+# ------------------------------------------- review r1, N1: atomic delivery
+
+
+def failing_copy(error):
+    def copy(src, dst, *args, **kwargs):
+        dst.write(src.read(7))  # a partial write before the disk gives up
+        raise error
+
+    return copy
+
+
+@pytest.mark.parametrize(
+    "error",
+    [OSError(errno.ENOSPC, "No space left on device"),
+     PermissionError(errno.EACCES, "Permission denied")],
+    ids=["ENOSPC", "EACCES"],
+)
+def test_a_failed_copy_stops_the_request_and_leaves_no_partial_file(
+    tmp_path, data_dir, key, monkeypatch, error
+):
+    http = FakeHttp(speech={FISH: audio(MP3_BYTES), HEYGEN: audio(PCM_BYTES, "audio/pcm")})
+    run = runner()
+    env = environment(data_dir, http, run)
+    monkeypatch.setattr(router.shutil, "copyfileobj", failing_copy(error))
+    with pytest.raises(router.OutputWriteError, match=error.strerror):
+        speak(tmp_path, env)
+    assert http.posts() == [FISH]  # no fall-through: HeyGen and edge never ran
+    assert run.calls == []
+    assert [a["engine"] for a in env.attempts] == ["fish"]
+    assert list((tmp_path / "out").iterdir()) == []  # neither output nor temp file
+
+
+def test_an_existing_output_is_untouched_when_the_write_fails(tmp_path, data_dir, monkeypatch):
+    out = tmp_path / "out" / "keep.mp3"
+    out.parent.mkdir()
+    out.write_bytes(b"earlier audio")
+    monkeypatch.setattr(router.shutil, "copyfileobj",
+                        failing_copy(OSError(errno.ENOSPC, "No space left on device")))
+    with pytest.raises(router.OutputWriteError):
+        router.speak(EN, out, env=environment(data_dir, FakeHttp()), language="en")
+    assert out.read_bytes() == b"earlier audio"
+    assert [p.name for p in out.parent.iterdir()] == ["keep.mp3"]
+
+
+def test_a_failed_replace_removes_the_temp_file(tmp_path, data_dir, monkeypatch):
+    def no_replace(src, dst):
+        raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+    monkeypatch.setattr(router.os, "replace", no_replace)
+    with pytest.raises(router.OutputWriteError, match="cross-device"):
+        speak(tmp_path, environment(data_dir, FakeHttp()))
+    assert list((tmp_path / "out").iterdir()) == []
+
+
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs a non-root POSIX user")
+def test_a_read_only_output_dir_stops_the_request(tmp_path, data_dir, key):
+    folder = tmp_path / "locked"
+    folder.mkdir()
+    folder.chmod(0o500)
+    http = FakeHttp(speech={FISH: audio(MP3_BYTES), HEYGEN: audio(PCM_BYTES, "audio/pcm")})
+    try:
+        with pytest.raises(router.OutputWriteError, match="Permission denied"):
+            router.speak(EN, folder / ".tts.abc.mp3", env=environment(data_dir, http),
+                         language="en")
+        assert list(folder.iterdir()) == []
+    finally:
+        folder.chmod(0o700)
+    assert http.posts() == [FISH]
+
+
+def test_delivery_goes_through_a_temp_file_and_replace(tmp_path, data_dir, monkeypatch):
+    seen = []
+    real = os.replace
+
+    def spy(src, dst):
+        seen.append((Path(src), Path(dst)))
+        return real(src, dst)
+
+    monkeypatch.setattr(router.os, "replace", spy)
+    _, out = speak(tmp_path, environment(data_dir, FakeHttp()))
+    ((src, dst),) = seen
+    assert dst == out and src.parent == out.parent and src.name.endswith(".part")
+    assert [p.name for p in out.parent.iterdir()] == [out.name]
