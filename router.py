@@ -32,9 +32,11 @@ engine, with ``tts.voice: <engine>:<voice>``. Per-profile personas come later.
 from __future__ import annotations
 
 import contextlib
+import errno
 import logging
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -362,15 +364,40 @@ def render_edge(
     return out
 
 
+_TEMP_TRIES = 16
+
+
+def _create_beside(out: Path) -> tuple[int, str]:
+    """Create a new, empty temp file beside *out*: ``(fd, path)``.
+
+    Mode ``0o666`` given to ``os.open``, so the kernel applies the process
+    umask atomically at creation (``0666 & ~umask``, like Hermes's other TTS
+    providers). The umask is never read or changed: the ``os.umask(0)`` and
+    restore pair would race with other threads creating files meanwhile.
+    ``tempfile.mkstemp`` is not used because it always creates ``0600``.
+    ``O_EXCL`` (plus ``O_NOFOLLOW``) never opens an existing file or link.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    for _ in range(_TEMP_TRIES):
+        path = out.parent / f".{out.name}.{secrets.token_hex(6)}.part"
+        try:
+            return os.open(path, flags, 0o666), str(path)
+        except FileExistsError:
+            continue
+    raise FileExistsError(errno.EEXIST, "no free temporary name", str(out.parent))
+
+
 def deliver(made: Path, out: Path) -> None:
     """Put *made* at *out* atomically: a temp file beside *out*, then ``os.replace``.
 
-    On any error the temp file is removed, *out* is untouched, and
-    :class:`OutputWriteError` is raised.
+    The file gets ``0666 & ~umask`` (see :func:`_create_beside`). On any error
+    the temp file is removed, *out* is untouched, and :class:`OutputWriteError`
+    is raised.
     """
     tmp: str | None = None
     try:
-        fd, tmp = tempfile.mkstemp(prefix=f".{out.name}.", suffix=".part", dir=out.parent)
+        fd, tmp = _create_beside(out)
         with os.fdopen(fd, "wb") as dst, open(made, "rb") as src:
             shutil.copyfileobj(src, dst)
         os.replace(tmp, out)

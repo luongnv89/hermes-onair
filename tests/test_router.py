@@ -782,3 +782,61 @@ def test_ffmpeg_version_parsing():
     assert router._ffmpeg_version(Path("ffmpeg-10.0.1-linux-x64")) == (10, 0, 1)
     assert router._ffmpeg_version(Path("ffmpeg-9.0.1-linux-x64")) == (9, 0, 1)
     assert router._ffmpeg_version(Path("ffmpeg-custom")) == ()
+
+
+# ------------------------------------------ review r2, N7: umask file mode
+
+
+@pytest.fixture
+def umask():
+    """Set the process umask for one test, then restore it."""
+    saved = os.umask(0o022)
+    os.umask(saved)
+    yield lambda value: os.umask(value)
+    os.umask(saved)
+
+
+@pytest.mark.parametrize(("mask", "mode"), [(0o002, 0o664), (0o022, 0o644), (0o077, 0o600)])
+def test_the_delivered_file_honours_the_umask(tmp_path, data_dir, umask, mask, mode):
+    umask(mask)
+    _, out = speak(tmp_path, environment(data_dir, FakeHttp()))
+    assert out.stat().st_mode & 0o777 == mode
+    assert [p.name for p in out.parent.iterdir()] == [out.name]
+
+
+@pytest.mark.parametrize(("mask", "mode"), [(0o002, 0o664), (0o022, 0o644), (0o077, 0o600)])
+def test_the_provider_writes_hermes_temp_path_with_the_umask_mode(
+    tmp_path, data_dir, key, umask, mask, mode
+):
+    # End to end through OnAirTTS.synthesize, the path Hermes's tts_tool calls.
+    umask(mask)
+    folder = tmp_path / "audio_cache"
+    folder.mkdir()
+    temp = folder / ".tts_20261106_101500.0b1c2d3e.mp3"
+    http = FakeHttp(speech={FISH: audio(MP3_BYTES)})
+    assert provider(data_dir, http).synthesize(EN, str(temp)) == str(temp)
+    assert temp.read_bytes() == MP3_BYTES and temp.stat().st_mode & 0o777 == mode
+    assert [p.name for p in folder.iterdir()] == [temp.name]
+
+
+def test_a_taken_temp_name_is_skipped_never_opened(tmp_path, data_dir, monkeypatch):
+    names = iter(["aaaaaaaaaaaa", "bbbbbbbbbbbb"])
+    monkeypatch.setattr(router.secrets, "token_hex", lambda n: next(names))
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    taken = out_dir / ".x.mp3.aaaaaaaaaaaa.part"
+    taken.symlink_to(tmp_path / "elsewhere")  # O_EXCL: never followed, never written
+    router.speak(EN, out_dir / "x.mp3", env=environment(data_dir, FakeHttp()), language="en")
+    assert (out_dir / "x.mp3").read_bytes() == EDGE_MP3
+    assert taken.is_symlink() and not (tmp_path / "elsewhere").exists()
+
+
+def test_no_free_temp_name_stops_the_request(tmp_path, data_dir, monkeypatch):
+    monkeypatch.setattr(router.secrets, "token_hex", lambda n: "cccccccccccc")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    (out_dir / ".x.mp3.cccccccccccc.part").write_text("someone else's")
+    with pytest.raises(router.OutputWriteError, match="no free temporary name"):
+        router.speak(EN, out_dir / "x.mp3", env=environment(data_dir, FakeHttp()), language="en")
+    assert sorted(p.name for p in out_dir.iterdir()) == [".x.mp3.cccccccccccc.part"]
+
