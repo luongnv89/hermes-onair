@@ -34,9 +34,11 @@ config_schema:
     type: str
     default: ""
     description: >-
-      Path or name of ffmpeg, used to convert HeyGen's raw PCM and to make
-      non-MP3 formats; empty looks on PATH, then in Hermes's managed tools
-      (~/.hermes/tools/ffmpeg-*/bin/ffmpeg). Without ffmpeg, HeyGen is skipped.
+      Path (with a / or a leading ~) or name on PATH of ffmpeg, used to
+      convert HeyGen's raw PCM and to make non-MP3 formats; empty looks on
+      PATH, then in Hermes's managed tools ($HERMES_HOME/tools, then
+      ~/.hermes/tools: the newest ffmpeg-*/bin/ffmpeg). Without ffmpeg,
+      HeyGen is skipped and only MP3 can be made.
   language:
     type: str
     default: auto
