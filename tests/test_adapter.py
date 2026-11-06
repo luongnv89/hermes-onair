@@ -108,24 +108,106 @@ def test_status_sets_follow_the_contract():
     needs_input = {s for s in JobStatus if s.needs_input}
     assert needs_input == {JobStatus.NEEDS_AGENT, JobStatus.NEEDS_APPROVAL}
     assert not JobStatus.RENDERING.terminal and not JobStatus.RENDERING.needs_input
-    # Only a delivered job is beyond a resume.
-    assert {s for s in JobStatus if not s.resumable} == {JobStatus.DELIVERED}
+    # Resumability depends on the result, not the status: no status-level set.
+    assert not hasattr(JobStatus.FAILED, "resumable")
+    assert not hasattr(adapter, "RESUMABLE")
 
 
-def test_failed_is_resumable_not_terminal():
-    # The pinned DropCast's run.py:2335-2344: a failed step's next is `dropcast resume JOB`.
-    failed = adapter.parse_result(
-        result_json("failed", step="render", next="dropcast resume /data/jobs/2026-11-05-abc")
+# --- resumability, one test per `next` shape the pinned DropCast's run.py builds ---
+
+JOB = "/data/jobs/2026-11-05-abc"
+
+
+def shape(status, step, next_, **extra):
+    return adapter.parse_result(result_json(status, step=step, next=next_, **extra))
+
+
+def test_declined_approval_stop_is_resumable_with_free():
+    # run.py:1403-1410: Wait("stopped", "... run dropcast resume JOB --answer yes (or --answer
+    # free)", approval=decision); the result's next is the bare resume (run.py:2314).
+    result = shape(
+        "stopped", "approval", f"dropcast resume {JOB}",
+        approval={"status": "declined", "allowed": False},
+        message=f"Stopped: the paid render was declined and nothing was spent. The job is kept; "
+        f"to continue run dropcast resume {JOB} --answer yes (or --answer free).",
     )
-    assert not failed.status.terminal
-    assert failed.status.resumable and failed.resumable
+    assert result.status.terminal  # nothing happens without a new decision ...
+    assert result.resumable and result.resume_blocker is None  # ... which may be free
 
 
-def test_a_failed_ingest_without_a_job_is_not_resumable():
-    result = adapter.parse_result(
-        result_json("failed", step="ingest", job=None, next="dropcast run https://x")
+def test_headless_stop_without_a_free_option_is_blocked():
+    # run.py:1484-1491 (+ 1443-1454): the free engine cannot be used; the message asks for
+    # a budget (`--approve-budget N`) or a shorter --length.
+    result = shape(
+        "stopped", "approval", f"dropcast resume {JOB}",
+        approval={"status": "needs_approval", "allowed": False},
+        headless={"budget_credits": 0, "budget_usd": 0, "budget_origin": "flag",
+                  "outcome": "stopped", "reason": "no budget"},
+        message="Headless run stopped before rendering: ... To render, approve a budget: "
+        f"dropcast resume {JOB} --approve-budget 120",
     )
-    assert result.status.resumable and not result.resumable
+    assert not result.resumable
+    assert result.resume_blocker.startswith("headless run stopped")
+
+
+def test_failed_ingest_with_a_job_is_blocked():
+    # run.py:2283-2298: on resume, ingest never finished; next = request["retry"], the
+    # original `dropcast run ...` (run.py:3105-3123), so a resume would start over.
+    result = shape(
+        "failed", "ingest",
+        "dropcast run --adapter headless --headless --no-publish https://example.com/a",
+    )
+    assert result.job == JOB
+    assert result.resume_blocker == "next starts over instead of resuming: dropcast run"
+
+
+def test_failed_ingest_without_a_job_is_blocked():
+    result = shape("failed", "ingest", "dropcast run https://x", job=None)
+    assert result.resume_blocker.startswith("no job folder")
+
+
+def test_failed_render_is_resumable_not_terminal():
+    # run.py:2335-2344: a failed step keeps the job; next = `dropcast resume JOB`.
+    result = shape("failed", "render", f"dropcast resume {JOB}")
+    assert not result.status.terminal
+    assert result.resumable
+
+
+def test_needs_approval_is_resumable_with_free_or_no():
+    # run.py:1415: answer_command = dropcast resume JOB --answer 'yes|no|free'.
+    result = shape("needs_approval", "approval", f"dropcast resume {JOB} --answer 'yes|no|free'")
+    assert result.resumable
+
+
+@pytest.mark.parametrize(
+    ("next_", "blocker"),
+    [
+        (f"dropcast resume {JOB} --answer yes", "needs --answer yes"),
+        (f"dropcast resume {JOB} --answer=yes", "needs --answer yes"),
+        (f"dropcast resume {JOB} --approve-budget 120", "needs a budget (--approve-budget)"),
+        (f"dropcast resume {JOB} --approve-budget-usd=0.42", "needs a budget"),
+        (f"dropcast resume {JOB} --engine elevenlabs", "needs --engine elevenlabs"),
+        (f"dropcast resume {JOB} --engine=openrouter", "needs --engine openrouter"),
+        ("dropcast resume 'unclosed", "not a command line"),
+    ],
+)
+def test_resumes_needing_refused_flags_are_blocked(next_, blocker):
+    result = shape("needs_approval", "approval", next_)
+    assert blocker in result.resume_blocker
+
+
+def test_resumable_shapes_rendering_needs_agent_and_story_groups():
+    assert shape("rendering", "render", f"dropcast resume {JOB}").resumable
+    assert shape("needs_agent", "script", f"dropcast resume {JOB}").resumable
+    # run.py:2844: a story group offers --answer 'yes|free'.
+    assert shape("stopped", "approval", f"dropcast resume {JOB} --answer 'yes|free'",
+                 approval={"status": "declined"}).resumable
+    assert shape("rendering", "render", f"dropcast resume {JOB} --engine edgetts").resumable
+
+
+def test_delivered_and_missing_next_are_not_resumable():
+    assert shape("delivered", "reply", None).resume_blocker == "the job is delivered"
+    assert shape("needs_agent", "script", None).resume_blocker == "DropCast offers no next command"
 
 
 def test_parse_result_reads_a_delivered_reply():

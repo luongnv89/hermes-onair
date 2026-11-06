@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -82,7 +83,14 @@ class AdapterError(RuntimeError):
 
 
 class JobStatus(StrEnum):
-    """``status`` of a DropCast result (``schemas/result.schema.json``)."""
+    """``status`` of a DropCast result (``schemas/result.schema.json``).
+
+    There is deliberately no status-level "resumable": whether a job can go
+    on depends on the result, not its status. Every non-delivered status can
+    carry a ``dropcast resume`` command, yet a stopped run may need a budget
+    and a failed ingest's ``next`` starts over with ``dropcast run``. Use
+    :attr:`JobResult.resumable` / :attr:`JobResult.resume_blocker`.
+    """
 
     NEEDS_AGENT = "needs_agent"
     NEEDS_APPROVAL = "needs_approval"
@@ -102,26 +110,12 @@ class JobStatus(StrEnum):
         return self in TERMINAL
 
     @property
-    def resumable(self) -> bool:
-        """True when ``dropcast resume`` can continue a job left in this status."""
-        return self in RESUMABLE
-
-    @property
     def needs_input(self) -> bool:
         """True when the caller must act (write a script, answer) and resume."""
         return self in NEEDS_INPUT
 
 
 TERMINAL: frozenset[JobStatus] = frozenset({JobStatus.DELIVERED, JobStatus.STOPPED})
-RESUMABLE: frozenset[JobStatus] = frozenset(
-    {
-        JobStatus.NEEDS_AGENT,
-        JobStatus.NEEDS_APPROVAL,
-        JobStatus.RENDERING,
-        JobStatus.FAILED,
-        JobStatus.STOPPED,
-    }
-)
 NEEDS_INPUT: frozenset[JobStatus] = frozenset(
     {JobStatus.NEEDS_AGENT, JobStatus.NEEDS_APPROVAL}
 )
@@ -148,12 +142,71 @@ class JobResult:
 
     @property
     def resumable(self) -> bool:
-        """True when this result's job folder can be continued with :func:`resume`.
+        """True when :func:`resume` can move this job on (see :attr:`resume_blocker`)."""
+        return self.resume_blocker is None
 
-        A failed ingest has no job folder (``job`` is null): its ``next`` is a
-        fresh ``dropcast run``, not a resume.
+    @property
+    def resume_blocker(self) -> str | None:
+        """Why :func:`resume` cannot move this job on, or None when it can.
+
+        A result is resumable only when it has a job folder, its ``next`` is a
+        ``dropcast resume`` command, and that resume needs nothing this plugin
+        refuses (``--answer yes``, a budget flag, an engine other than
+        edgetts). The ``next`` shapes at the pinned commit (``run.py``):
+
+        - needs_approval: ``dropcast resume JOB --answer yes|no|free``: resumable
+          with ``answer="free"`` or ``"no"``;
+        - stopped after a declined approval: ``dropcast resume JOB``, with the
+          message naming ``--answer yes`` "(or --answer free)": resumable with
+          ``answer="free"``;
+        - a headless stop (the free engine cannot be used, ``approval.status``
+          not ``declined``): ``dropcast resume JOB``, but only a budget, a
+          shorter length or installing the free engine would render: blocked;
+        - failed at a step: ``dropcast resume JOB``: resumable (a re-run);
+        - failed ingest found on resume: ``job`` set but ``next`` is the
+          original ``dropcast run …``: blocked (it starts over).
         """
-        return self.status.resumable and self.job is not None
+        if self.status is JobStatus.DELIVERED:
+            return "the job is delivered"
+        if self.job is None:
+            return "no job folder: DropCast must start over (`dropcast run`)"
+        if not self.next:
+            return "DropCast offers no next command"
+        try:
+            words = shlex.split(self.next)
+        except ValueError:
+            return "next is not a command line"
+        if words[:2] != ["dropcast", "resume"]:
+            return f"next starts over instead of resuming: {' '.join(words[:2])}"
+        problem = _forbidden_resume_flags(words[2:])
+        if problem:
+            return problem
+        if self.status is JobStatus.STOPPED:
+            approval = self.raw.get("approval")
+            decided = approval.get("status") if isinstance(approval, dict) else None
+            if decided != "declined":
+                return (
+                    "headless run stopped: the free engine cannot be used, and only a "
+                    "paid budget or a change to the job would render it"
+                )
+        return None
+
+
+def _forbidden_resume_flags(args: list[str]) -> str | None:
+    """What in a ``dropcast resume`` argument list this plugin will not send."""
+    i = 0
+    while i < len(args):
+        flag, _, inline = args[i].partition("=")
+        takes_value = flag in ("--answer", "--engine") and not inline
+        value = inline or (args[i + 1] if takes_value and i + 1 < len(args) else "")
+        if flag in ("--approve-budget", "--approve-budget-usd"):
+            return f"the resume needs a budget ({flag}): paid renders are refused"
+        if flag == "--answer" and not set(value.split("|")) & _ALLOWED_ANSWERS:
+            return f"the resume needs --answer {value or '?'}: only no or free are sent"
+        if flag == "--engine" and value != "edgetts":
+            return f"the resume needs --engine {value or '?'}: only edgetts is used"
+        i += 2 if takes_value else 1
+    return None
 
 
 # --- Install surface (used by ``hermes onair setup``). ---
