@@ -198,6 +198,8 @@ def state_db(root: Path, name: str) -> Path | None:
     own folder. Raises :class:`StandupError` for a link or an escape.
     """
     home = profile_home(root, name)
+    if name != DEFAULT_PROFILE and home.parent.is_symlink():
+        raise StandupError("the profiles folder is a symbolic link")
     if name != DEFAULT_PROFILE and home.is_symlink():
         raise StandupError("its profile folder is a symbolic link")
     if not home.is_dir():
@@ -214,7 +216,7 @@ def state_db(root: Path, name: str) -> Path | None:
     return real
 
 
-def connect_ro(db: Path, connect: Callable[..., sqlite3.Connection] = sqlite3.connect
+def connect_ro(db: Path, connect: Callable[..., sqlite3.Connection] | None = None
                ) -> sqlite3.Connection:
     """A read-only connection to *db*: URI ``mode=ro``, then ``query_only``.
 
@@ -222,7 +224,8 @@ def connect_ro(db: Path, connect: Callable[..., sqlite3.Connection] = sqlite3.co
     (a WAL database's ``-shm`` index is SQLite's shared memory, not the data).
     """
     uri = f"file:{urllib.parse.quote(str(db))}?mode=ro"
-    conn = connect(uri, uri=True, timeout=CONNECT_TIMEOUT_S, isolation_level=None)
+    opener = connect or sqlite3.connect  # looked up per call: a test may patch it
+    conn = opener(uri, uri=True, timeout=CONNECT_TIMEOUT_S, isolation_level=None)
     try:
         conn.execute("PRAGMA query_only = ON")
     except Exception:
@@ -236,7 +239,7 @@ def _columns(conn: sqlite3.Connection) -> set[str]:
 
 
 def read_history(root: Path, name: str, now: float, *,
-                 connect: Callable[..., sqlite3.Connection] = sqlite3.connect,
+                 connect: Callable[..., sqlite3.Connection] | None = None,
                  key: str | None = None) -> History:
     """*name*'s session titles (and summaries) active since ``now - 24 h``, newest first.
 
@@ -289,7 +292,8 @@ def read_history(root: Path, name: str, now: float, *,
 
 _URLISH = re.compile(r"\b[a-z][a-z0-9+.-]*://\S+|\bwww\.\S+|[\w.+-]+@[\w-]+\.[\w.]+|"
                      r"\b[\w.-]+\.(?:com|org|net|io|dev|ai|co|edu|gov)\b\S*", re.IGNORECASE)
-_PATHISH = re.compile(r"(?:~|\.{1,2})?/[\w.@~/-]+")
+#: A file path: two slashes or more, or one slash and a file extension ("CI/CD" stays).
+_PATHISH = re.compile(r"[\w.~-]*(?:/[\w.@~-]+){2,}/?|[\w.~-]*/[\w@~-]+\.\w{1,5}\b")
 _MARKS = re.compile(r"[\[\]{}<>*_`#|\\]")
 _LONG_DIGITS = re.compile(r"\d[\d .()-]{6,}\d")
 
@@ -647,7 +651,7 @@ def make_standup(
     keep: int = episode.KEEP_EPISODES,
     script_task: str | None = None,
     now: float | None = None,
-    connect: Callable[..., sqlite3.Connection] = sqlite3.connect,
+    connect: Callable[..., sqlite3.Connection] | None = None,
 ) -> Standup:
     """Read, write and voice the standup for *names* (already opted in)."""
     tools = tools or episode.Tools()
@@ -780,7 +784,7 @@ def tool_result(made: Standup) -> dict[str, Any]:
 
 def run(host: episode.Host, requested: Iterable[str], *, scheduled: bool = False,
         now: float | None = None,
-        connect: Callable[..., sqlite3.Connection] = sqlite3.connect) -> Standup:
+        connect: Callable[..., sqlite3.Connection] | None = None) -> Standup:
     """The standup for *requested* profiles (none: every opted-in one), for this host.
 
     The opt-in check runs first: a refused profile stops the run before any
