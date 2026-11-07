@@ -399,29 +399,85 @@ def _headless(root: Path) -> list[str]:
     return ["--adapter", "headless", "--headless", "--root", str(root), *_SAFE_FLAGS]
 
 
+#: The shortest and longest episode a request may ask for, in minutes.
+MIN_LENGTH_MIN = 0.2
+MAX_LENGTH_MIN = 15.0
+
+
+def _brief_flags(
+    fmt: str | None, length_min: float | None, language: str | None, guests: int | None
+) -> list[str]:
+    """``--format``/``--length``/``--lang``/``--guests`` for a run or resume (checked)."""
+    flags: list[str] = []
+    if fmt is not None:
+        if not re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", fmt):
+            raise AdapterError(f"not a format name: {fmt!r}")
+        flags += ["--format", fmt]
+    if length_min is not None:
+        if isinstance(length_min, bool) or not isinstance(length_min, int | float):
+            raise AdapterError(f"not a length in minutes: {length_min!r}")
+        if not MIN_LENGTH_MIN <= float(length_min) <= MAX_LENGTH_MIN:
+            raise AdapterError(
+                f"length {length_min} min is outside {MIN_LENGTH_MIN}-{MAX_LENGTH_MIN} min"
+            )
+        flags += ["--length", f"{float(length_min):g}"]
+    if language is not None:
+        if not _LANG_TAG.fullmatch(language):
+            raise AdapterError(f"not a language tag: {language!r}")
+        flags += ["--lang", language]
+    if guests is not None:
+        if isinstance(guests, bool) or not isinstance(guests, int) or guests < 0:
+            raise AdapterError(f"not a guest count: {guests!r}")
+        flags += ["--guests", str(guests)]
+    return flags
+
+
 def build_run_argv(
-    venv: Path, root: Path, *, link: str | None = None, text: str | None = None
+    venv: Path,
+    root: Path,
+    *,
+    link: str | None = None,
+    text: str | None = None,
+    fmt: str | None = None,
+    length_min: float | None = None,
+    language: str | None = None,
+    guests: int | None = None,
 ) -> list[str]:
     """``dropcast run`` for one *link* (or file) or pasted *text*, headless, under *root*.
 
     Pasted text never goes in argv (Linux caps one argument at 128 KiB): the
     argv says ``--text -`` and :func:`run` pipes the text to DropCast's stdin,
     the way DropCast reads pasted text from a pipe. A *link* of ``-`` (stdin)
-    is refused.
+    is refused. *fmt*, *length_min*, *language* and *guests* shape the brief
+    (``--format``, ``--length``, ``--lang``, ``--guests``); None leaves
+    DropCast's default.
     """
     if (link is None) == (text is None):
         raise AdapterError("give exactly one of link or text")
     value = link if link is not None else text
     if not value or not value.strip() or (link is not None and link.strip() == "-"):
         raise AdapterError("nothing to run: empty source")
-    argv = [str(dropcast_executable(venv)), "run", *_headless(root)]
+    argv = [str(dropcast_executable(venv)), "run", *_headless(root),
+            *_brief_flags(fmt, length_min, language, guests)]
     if text is not None:
         return [*argv, "--text", "-"]
     return [*argv, "--", link]
 
 
-def build_resume_argv(venv: Path, job: str, root: Path, answer: str | None = None) -> list[str]:
-    """``dropcast resume JOB``, headless and unpaid; *answer* is ``no`` or ``free``."""
+def build_resume_argv(
+    venv: Path,
+    job: str,
+    root: Path,
+    answer: str | None = None,
+    *,
+    voices: Path | None = None,
+    length_min: float | None = None,
+) -> list[str]:
+    """``dropcast resume JOB``, headless and unpaid; *answer* is ``no`` or ``free``.
+
+    *voices* is a ``voices.json`` for the render (``--voices``); *length_min*
+    re-briefs the job to a new target length (``--length``).
+    """
     if not job or not job.strip():
         raise AdapterError("nothing to resume: empty job")
     if answer is not None and answer not in _ALLOWED_ANSWERS:
@@ -429,6 +485,9 @@ def build_resume_argv(venv: Path, job: str, root: Path, answer: str | None = Non
     argv = [str(dropcast_executable(venv)), "resume", *_headless(root)]
     if answer is not None:
         argv += ["--answer", answer]
+    argv += _brief_flags(None, length_min, None, None)
+    if voices is not None:
+        argv += ["--voices", str(voices)]
     return [*argv, "--", job]
 
 
@@ -476,11 +535,17 @@ def run(
     *,
     link: str | None = None,
     text: str | None = None,
+    fmt: str | None = None,
+    length_min: float | None = None,
+    language: str | None = None,
+    guests: int | None = None,
     runner: Runner = subprocess.run,
     env: Mapping[str, str] | None = None,
 ) -> JobResult:
     """Start a DropCast job. Exit 0 (delivered) and 1 (any other status) parse."""
-    return _call(build_run_argv(venv, root, link=link, text=text), runner, env, stdin_text=text)
+    argv = build_run_argv(venv, root, link=link, text=text, fmt=fmt, length_min=length_min,
+                          language=language, guests=guests)
+    return _call(argv, runner, env, stdin_text=text)
 
 
 def resume(
@@ -489,11 +554,14 @@ def resume(
     root: Path,
     answer: str | None = None,
     *,
+    voices: Path | None = None,
+    length_min: float | None = None,
     runner: Runner = subprocess.run,
     env: Mapping[str, str] | None = None,
 ) -> JobResult:
     """Continue a DropCast job after the caller acted on its last status."""
-    return _call(build_resume_argv(venv, job, root, answer), runner, env)
+    argv = build_resume_argv(venv, job, root, answer, voices=voices, length_min=length_min)
+    return _call(argv, runner, env)
 
 
 # --- Single-text edge-tts render (the voice router's last engine). ---
@@ -622,3 +690,419 @@ def _last_json_object(stdout: str | None) -> dict[str, Any] | None:
                 continue
             return data if isinstance(data, dict) else None
     return None
+
+
+# --- Episodes: the brief, the script contract, voices and the finish step. ---
+#
+# ``/onair`` drives one job: ``run`` stops at ``needs_agent`` (step script);
+# the plugin reads the brief and the ingested source, writes ``script.json``
+# and ``summary.txt`` from a neutral draft (:func:`write_script`), has
+# DropCast check it (:func:`check_script`, the module CLI ``python -m
+# dropcast.script finalize``, the same checks the script step runs), then
+# either resumes the job so DropCast voices it with edge-tts (``--voices``,
+# :func:`write_voices`), or renders the turns itself with a free OpenRouter
+# engine and hands them to DropCast's finish step (:func:`finish_parts`).
+
+EPISODE_FORMAT = "podcast-2host"
+SCRIPT_MODULE = f"{PACKAGE}.script"
+CHECK_TIMEOUT_S = 120
+FINISH_TIMEOUT_S = 300
+
+#: Neutral part names -> DropCast's ``show-v2`` section names, in their order.
+SECTIONS: dict[str, str] = {
+    "teaser": "Teaser",
+    "intro": "Intro",
+    "main": "Main",
+    "counter": "Counterpoints",
+    "corner": "Builder's Corner",
+    "takeaway": "Takeaways",
+    "question": "Open questions",
+    "outro": "Outro",
+}
+#: DropCast's hosts by speaker id, with the voice type each one keeps (its brand).
+HOST_GENDER: dict[str, str] = {"host_a": "man", "host_b": "woman"}
+_ASKER_ROLE = "host-curious"
+_EXPLAINER_ROLE = "host-expert"
+_LENGTH_ERROR = re.compile(r"^est_min .* is not within ")
+
+
+@dataclass(frozen=True)
+class Brief:
+    """What the script step asks for, read from the job's ``brief.json``."""
+
+    job: Path
+    language: str
+    target_min: float
+    word_range: tuple[int, int]
+    word_budget: int
+    show: str
+    opening: str
+    sign_off: str
+    corner: str
+    names: Mapping[str, str]  # speaker id -> host name
+    roles: Mapping[str, str]  # speaker id -> role
+    asker: str  # speaker id of the host who asks (says the opening line)
+    explainer: str  # speaker id of the host who explains
+    structure: str | None
+    faithfulness: str
+
+
+@dataclass(frozen=True)
+class Source:
+    """The ingested source (``source.json``): what the script may quote."""
+
+    title: str
+    author: str | None
+    url: str | None
+    language: str | None
+    text: str
+    word_count: int
+
+
+@dataclass(frozen=True)
+class ScriptCheck:
+    """DropCast's verdict on ``script.json``: errors, and the estimate it computed."""
+
+    ok: bool
+    errors: tuple[str, ...]
+    est_min: float | None
+
+    @property
+    def only_length(self) -> bool:
+        """True when the length band is the only problem (fixable by re-briefing)."""
+        return bool(self.errors) and all(_LENGTH_ERROR.match(e) for e in self.errors)
+
+
+def _job_json(job: Path, name: str) -> dict[str, Any]:
+    try:
+        data = json.loads((Path(job) / name).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise AdapterError(f"cannot read {name}: {getattr(exc, 'strerror', None) or exc}") from None
+    if not isinstance(data, dict):
+        raise AdapterError(f"{name} is not a JSON object")
+    return data
+
+
+def read_brief(job: str | Path) -> Brief:
+    """The job's ``brief.json`` (written by ``run`` before it stops at the script step)."""
+    job = Path(job)
+    data = _job_json(job, "brief.json")
+    try:
+        length = data["length"]
+        show = data["show"]
+        hosts = data["hosts"]
+        names = {sid: str(h["name"]) for sid, h in hosts.items()}
+        roles = {sid: str(h["role"]) for sid, h in hosts.items()}
+        low, high = (int(n) for n in length["word_range"])
+        brief = Brief(
+            job=job,
+            language=str(data["language"]),
+            target_min=float(data["target_min"]),
+            word_range=(low, high),
+            word_budget=int(length["word_budget"]),
+            show=str(show["name"]),
+            opening=str(show["opening"]),
+            sign_off=str(show["sign_off"]),
+            corner=str(show.get("builders_corner") or SECTIONS["corner"]),
+            names=names,
+            roles=roles,
+            asker=next(sid for sid, role in roles.items() if role == _ASKER_ROLE),
+            explainer=next(sid for sid, role in roles.items() if role == _EXPLAINER_ROLE),
+            structure=data.get("structure"),
+            faithfulness=str(data.get("faithfulness") or "factual"),
+        )
+    except (KeyError, TypeError, ValueError, StopIteration, AttributeError):
+        raise AdapterError("brief.json is not a two-host brief this plugin can follow") from None
+    if data.get("format") != EPISODE_FORMAT:
+        raise AdapterError(f"the brief asks for {data.get('format')!r}, not {EPISODE_FORMAT}")
+    return brief
+
+
+def read_source(job: str | Path) -> Source:
+    """The job's ``source.json``: title, author, link, language and text."""
+    data = _job_json(Path(job), "source.json")
+    text = data.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise AdapterError("the source has no text")
+
+    def opt(key: str) -> str | None:
+        value = data.get(key)
+        return value.strip() if isinstance(value, str) and value.strip() else None
+
+    count = data.get("word_count")
+    return Source(
+        title=opt("title") or "",
+        author=opt("author"),
+        url=opt("url"),
+        language=opt("language"),
+        text=text,
+        word_count=count if isinstance(count, int) else len(text.split()),
+    )
+
+
+def script_document(draft: Any, brief: Brief, source: Source,
+                    target_min: float | None = None) -> dict[str, Any]:
+    """``script.json`` (``podcast-2host``, ``show-v2``) for a neutral *draft*.
+
+    *draft* has ``title`` and ``turns``; each turn has ``host`` (``"asker"`` or
+    ``"explainer"``), ``part`` (a key of :data:`SECTIONS`), ``text`` and
+    ``quote`` (words copied from the source that back the line, or None).
+    Every quoted turn gets an ``ok`` fact-check entry. *target_min* replaces
+    the brief's target (after a re-brief to the script's own length).
+    """
+    speakers = []
+    for sid in sorted(brief.names):
+        speakers.append({"id": sid, "name": brief.names[sid], "role": brief.roles[sid]})
+    segments: list[dict[str, Any]] = []
+    checks: list[dict[str, Any]] = []
+    for index, turn in enumerate(draft.turns, 1):
+        if turn.part not in SECTIONS:
+            raise AdapterError(f"unknown script part: {turn.part!r}")
+        sid = f"s{index:03d}"
+        speaker = brief.asker if turn.host == "asker" else brief.explainer
+        segments.append({"id": sid, "speaker": speaker, "section": SECTIONS[turn.part],
+                         "text": turn.text, "cues": []})
+        if turn.quote:
+            checks.append({"claim": turn.text, "source_quote": turn.quote, "ok": True,
+                           "segment": sid})
+    target = float(target_min if target_min is not None else brief.target_min)
+    document: dict[str, Any] = {
+        "title": draft.title or source.title or "On Air",
+        "format": EPISODE_FORMAT,
+        "show": {"name": brief.show, "hosts": dict(brief.names)},
+        "language": brief.language,
+        "target_min": target,
+        "est_min": target,
+        "speakers": speakers,
+        "segments": segments,
+        "sources": [source.url or source.title or "pasted text"],
+        "faithfulness": brief.faithfulness,
+        "fact_check": checks,
+    }
+    if brief.structure:
+        document["structure"] = brief.structure
+    return document
+
+
+def write_script(job: str | Path, document: Mapping[str, Any], summary: list[str]) -> None:
+    """Write ``script.json`` and ``summary.txt`` (three short lines) into the job."""
+    job = Path(job)
+    lines = [" ".join(str(line).split())[:200] for line in summary][:3]
+    try:
+        (job / "script.json").write_text(
+            json.dumps(document, ensure_ascii=False, indent=1), encoding="utf-8"
+        )
+        (job / "summary.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except OSError as exc:
+        raise AdapterError(f"cannot write the script: {exc.strerror or exc}") from None
+
+
+def check_script_argv(venv: Path, job: Path) -> list[str]:
+    """``python -m dropcast.script finalize`` on the job's script, against its source."""
+    python = Path(venv) / "bin" / "python"
+    return [str(python), "-I", "-m", SCRIPT_MODULE, "finalize",
+            str(Path(job) / "script.json"), "--source", str(Path(job) / "source.json")]
+
+
+def check_script(
+    venv: Path,
+    job: str | Path,
+    *,
+    runner: Runner = subprocess.run,
+    env: Mapping[str, str] | None = None,
+) -> ScriptCheck:
+    """Run DropCast's script checks on ``script.json`` (it is polished in place).
+
+    Exit 0 passes; exit 1 lists the problems, one per indented line (on
+    stdout or stderr). The estimate is read back from the rewritten
+    ``script.json``.
+    """
+    job = Path(job)
+    try:
+        proc = runner(
+            check_script_argv(venv, job), stdin=subprocess.DEVNULL, capture_output=True,
+            text=True, timeout=CHECK_TIMEOUT_S, env=child_env(env), check=False,
+        )
+    except FileNotFoundError:
+        raise AdapterError("the sidecar is not installed; run `hermes onair setup`") from None
+    except subprocess.TimeoutExpired:
+        raise AdapterError(f"the script check did not answer within {CHECK_TIMEOUT_S} s") from None
+    except OSError as exc:
+        raise AdapterError(f"the script check could not start: {exc.strerror or exc}") from None
+    if proc.returncode not in (0, 1):
+        tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-1:] or ["no detail"]
+        raise AdapterError(f"the script check failed (exit {proc.returncode}): {tail[0][:300]}")
+    output = f"{proc.stdout or ''}\n{proc.stderr or ''}"
+    errors = tuple(line.strip() for line in output.splitlines() if line.startswith("  "))
+    if proc.returncode == 1 and not errors:
+        errors = ("the script check failed without a reason",)
+    est = None
+    try:
+        value = json.loads((job / "script.json").read_text(encoding="utf-8")).get("est_min")
+        est = float(value) if isinstance(value, int | float) else None
+    except (OSError, ValueError, AttributeError):
+        est = None
+    return ScriptCheck(ok=proc.returncode == 0, errors=errors, est_min=est)
+
+
+def script_lines(job: str | Path) -> list[tuple[str, str, str]]:
+    """``(segment id, speaker id, text)`` of the checked (polished) ``script.json``."""
+    data = _job_json(Path(job), "script.json")
+    lines = []
+    for seg in data.get("segments") or []:
+        if not isinstance(seg, dict):
+            raise AdapterError("script.json has a malformed segment")
+        sid, speaker, text = seg.get("id"), seg.get("speaker"), seg.get("text")
+        if not (_is_text(sid) and _is_text(speaker) and _is_text(text)):
+            raise AdapterError("script.json has a malformed segment")
+        lines.append((sid, speaker, text))
+    if not lines:
+        raise AdapterError("script.json has no segments")
+    return lines
+
+
+def write_voices(path: Path, brief: Brief, voices: Mapping[str, str]) -> Path:
+    """A ``voices.json`` giving each host (speaker id -> edge-tts voice) its voice.
+
+    Keys are ``host-<name>/<lang>`` (how the engine voices Bob and Alice) and
+    ``<role>/<lang>`` (how it voices a host with any other name).
+    """
+    roles: dict[str, Any] = {}
+    primary = brief.language.split("-", 1)[0].lower()
+    for sid, voice in voices.items():
+        if not _EDGE_VOICE.fullmatch(voice or ""):
+            raise AdapterError(f"not an edge-tts voice name: {voice!r}")
+        # A host named Bob or Alice is voiced by name; any other host by its role.
+        for key in (f"host-{brief.names[sid].lower()}", brief.roles[sid]):
+            for lang in dict.fromkeys((brief.language, primary)):
+                roles[f"{key}/{lang}"] = {"edgetts": voice}
+    try:
+        Path(path).write_text(json.dumps({"roles": roles}, indent=1), encoding="utf-8")
+    except OSError as exc:
+        raise AdapterError(f"cannot write voices.json: {exc.strerror or exc}") from None
+    return Path(path)
+
+
+@dataclass(frozen=True)
+class Finished:
+    """A finished episode: the MP3, its WebVTT transcript and its length."""
+
+    episode: Path
+    transcript: Path | None
+    duration_s: float | None
+
+
+def _finished(episode: str, transcript: Any, duration: Any) -> Finished:
+    has_vtt = _is_text(transcript) and Path(transcript).is_file()
+    return Finished(
+        episode=Path(episode),
+        transcript=Path(transcript) if has_vtt else None,
+        duration_s=float(duration) if isinstance(duration, int | float) else None,
+    )
+
+
+def delivered(result: JobResult) -> Finished:
+    """The episode a ``delivered`` result names."""
+    if result.status is not JobStatus.DELIVERED:
+        raise AdapterError(f"the job is {result.status.value}, not delivered")
+    found: dict[str, Any] = {}
+    for holder in (result.raw.get("delivery"), result.reply):
+        if isinstance(holder, Mapping):
+            for key in ("episode", "transcript", "duration_s"):
+                if found.get(key) is None:
+                    found[key] = holder.get(key)
+    episode = found.get("episode")
+    if not _is_text(episode) or not Path(episode).is_file():
+        raise AdapterError("the delivered result names no episode file")
+    transcript = found.get("transcript")
+    duration = found.get("duration_s")
+    return _finished(episode, transcript, duration)
+
+
+# The finish step has no CLI at the pin (only ``measure`` and ``report``), so
+# this one internal call runs inside the sidecar's Python. It reads a spec
+# file (job, parts, engine record), joins the parts with DropCast's finish
+# (theme, loudness, transcript.vtt, run.json) and prints one JSON object.
+_FINISH_PY = """
+import json, sys
+from pathlib import Path
+from dropcast import finish
+spec = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+job = Path(spec["job"])
+script = json.loads((job / "script.json").read_text(encoding="utf-8"))
+parts = [finish.Part(Path(p["path"]), (finish.Piece(p["segment"], p["text"]),))
+         for p in spec["parts"]]
+run = {"engine": "openrouter", "model": spec["model"], "voices": spec["voices"],
+       "chunks": [{"id": p["segment"], "chars": len(p["text"]), "status": "done"}
+                  for p in spec["parts"]],
+       "credits_estimated": None, "credits_used": None, "cost_estimated_usd": 0.0,
+       "private_use": False, "cues_dropped": 0, "duration_s": None,
+       "started": spec["started"], "finished": None, "errors": []}
+try:
+    done = finish.finish_episode(parts, job, script=script, fmt="mp3", run=run,
+                                 check_speech=False)
+except finish.FinishError as exc:
+    run["errors"].append(str(exc))
+    finish.write_report(job, run, script.get("title"))
+    print(json.dumps({"ok": False, "error": str(exc)}))
+    sys.exit(1)
+run["duration_s"] = done.duration_s
+finish.write_report(job, run, script.get("title"))
+print(json.dumps({"ok": True, "episode": str(done.episode),
+                  "transcript": str(done.transcript), "duration_s": done.duration_s}))
+"""
+
+
+def finish_argv(venv: Path, spec: Path) -> list[str]:
+    return [str(Path(venv) / "bin" / "python"), "-I", "-c", _FINISH_PY, str(spec)]
+
+
+def finish_parts(
+    venv: Path,
+    job: str | Path,
+    parts: list[tuple[Path, str, str]],
+    *,
+    model: str,
+    voices: Mapping[str, str],
+    started: str,
+    runner: Runner = subprocess.run,
+    env: Mapping[str, str] | None = None,
+) -> Finished:
+    """Join rendered *parts* ``(mp3 path, segment id, text)`` with DropCast's finish step.
+
+    Writes ``episode.mp3``, ``transcript.vtt`` and ``run.json`` into *job*.
+    """
+    job = Path(job)
+    spec = job / "onair-finish.json"
+    record = {
+        "job": str(job), "model": model, "voices": dict(voices), "started": started,
+        "parts": [{"path": str(p), "segment": s, "text": t} for p, s, t in parts],
+    }
+    try:
+        spec.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+    except OSError as exc:
+        raise AdapterError(f"cannot write the finish spec: {exc.strerror or exc}") from None
+    try:
+        proc = runner(
+            finish_argv(venv, spec), stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            timeout=FINISH_TIMEOUT_S, env=child_env(env), check=False,
+        )
+    except FileNotFoundError:
+        raise AdapterError("the sidecar is not installed; run `hermes onair setup`") from None
+    except subprocess.TimeoutExpired:
+        raise AdapterError(f"the finish step did not answer within {FINISH_TIMEOUT_S} s") from None
+    except OSError as exc:
+        raise AdapterError(f"the finish step could not start: {exc.strerror or exc}") from None
+    data = _last_json_object(proc.stdout)
+    if proc.returncode != 0 or not data or data.get("ok") is not True:
+        reason = data.get("error") if data else None
+        if not isinstance(reason, str) or not reason:
+            tail = (proc.stderr or "").strip().splitlines()[-1:] or ["no detail"]
+            reason = tail[0]
+        raise AdapterError(f"the finish step failed (exit {proc.returncode}): {reason[:300]}")
+    episode = data.get("episode")
+    if not _is_text(episode) or not Path(episode).is_file():
+        raise AdapterError("the finish step names no episode file")
+    transcript = data.get("transcript")
+    duration = data.get("duration_s")
+    return _finished(episode, transcript, duration)

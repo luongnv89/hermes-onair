@@ -2,8 +2,9 @@
 On Air: free voices and two-host audio shows for Hermes Agent (Hermes plugin)
 
 > Status: early (v0.1.0). This release ships `hermes onair setup`, the free
-> voice router (`tts.provider: onair`) and a distinct voice per profile
-> (`/onair voice`); shows (`/onair` episodes) come next.
+> voice router (`tts.provider: onair`), a distinct voice per profile
+> (`/onair voice`) and two-host episodes (`/onair <link or text>` and the
+> `onair_episode` agent tool); the Agent Standup show comes next.
 
 ## Install
 
@@ -157,7 +158,91 @@ Settings (`plugins.entries.onair.settings` in `config.yaml`):
 | `sidecar_python` | `">=3.11"` | Python request for `uv venv --python`. |
 | `ffmpeg_bin` | `""` | A path (with `/` or a leading `~`) or a name looked up on `PATH`; empty looks on `PATH`, then for the newest `ffmpeg-*/bin/ffmpeg` in `$HERMES_HOME/tools`, then `~/.hermes/tools`. |
 | `language` | `auto` | Language of the text (`en`, `fr`, `vi`, …); `auto` detects en/fr/vi. |
-| `voices` | `{}` | Voice per engine and language, e.g. `{edge: {fr: fr-FR-HenriNeural}, heygen: {"*": tabitha}}`. |
+| `voices` | `{}` | Voice per engine and language, e.g. `{edge: {fr: fr-FR-HenriNeural}, heygen: {"*": tabitha}}`. Speech only: an episode's two hosts keep their personas' voices. |
+| `episode_minutes` | `1.0` | Target length of an `/onair` episode (1 to 5 minutes) when the request names none. |
+| `keep_episodes` | `30` | Episode folders kept under the plugin data dir; older ones are removed after each new episode. `0` keeps all. |
+
+## Episodes: `/onair <link or text>` and `onair_episode`
+
+```text
+/onair https://science.nasa.gov/moon/facts/
+/onair --lang fr --minutes 2 <pasted text>
+```
+
+On Air replies at once ("recording…"), then about a minute later with the
+episode: a two-host MP3 (DropCast's `podcast-2host` show), its WebVTT
+transcript, the voices and timings, and a last line `MEDIA:/abs/path.mp3`
+that the gateway sends as an audio attachment. The agent tool
+`onair_episode` (`source`, `language`, `minutes`) runs the same pipeline and
+returns JSON with the `MEDIA:` path, the transcript, the engine, the model
+id and the timings.
+
+1. **Ingest**: DropCast reads the link (http/https only; a local path is
+   treated as text) or the text, and briefs the episode: the target length
+   (`--minutes`, else the `episode_minutes` setting, default 1), the language
+   (`--lang`, else the `language` setting, else detected from the source:
+   en, fr and vi are supported), no guests.
+2. **Script**: written by **your own configured model** through `ctx.llm`, so
+   its cost follows your model choice; On Air passes no model override and
+   records the model id the call returns. One retry with backoff (a
+   Retry-After of up to 10 s is honoured); a hard cap of about 150 spoken
+   words per minute; lines must quote the source, and a line with a link,
+   web address, email or phone number is dropped. The source is passed as
+   fenced data the model is told never to follow. The answer is read
+   leniently (a fenced block, prose around it, a `<think>` block, a trailing
+   comma); when none can be read, the reply says what came back. When
+   the model fails (free models often answer HTTP 429), a built-in template
+   built from sentences of the source is used instead (never a sentence
+   with a link, web address, email or phone number), and the reply says so.
+   The call runs through On Air's own auxiliary task, `onair_script` (see
+   below), with reasoning off and a 40 s timeout per attempt.
+3. **Checks**: DropCast's own script checks (show order, fixed lines,
+   fact-check quotes, length). An LLM script that fails them is replaced by
+   the template.
+4. **Render**: one engine for the whole episode, never mixed: Fish (English
+   first) or HeyGen, OpenRouter's free models behind the price gate, when
+   `OPENROUTER_API_KEY` is set; otherwise edge-tts. Two hosts, two personas:
+   your profile's persona hosts in its own name and voice, with the next
+   persona of the other voice type as co-host. The show itself keeps
+   DropCast's fixed name, opening and sign-off ("Build Wiz AI Show"): its
+   script checks accept no other.
+5. **Deliver**: `episode.mp3` and `transcript.vtt` under
+   `$HERMES_HOME/plugin-data/onair/episodes/<stamp>/jobs/<job>/`, with
+   `onair.json` (engine, voices, script source, model id, timings). The
+   newest `keep_episodes` (30) episode folders are kept; older ones are removed.
+
+Episodes voiced by edge-tts are for your private listening only: the reply
+says so. Never publish them.
+
+**The `onair_script` task: reasoning off.** On Air registers an auxiliary
+LLM task, `onair_script` ("On Air episode script"), and makes the script call
+through it. Its only default is `reasoning_effort: none`. It names no
+provider or model, so the call still runs on your main model, exactly as
+without it (no override). The setting stops a reasoning model from spending
+the answer's token budget (4096) on thinking: free reasoning models otherwise
+came back with an empty answer. Hermes turns it into `reasoning: {enabled:
+false}` for the request (`thinking: disabled` on Claude). To change it, add an
+`auxiliary.onair_script` block to `config.yaml`; your values override the
+plugin's defaults:
+
+```yaml
+# config.yaml
+auxiliary:
+  onair_script:
+    reasoning_effort: low   # or none (the default), medium, high
+```
+
+On a Hermes without `ctx.register_auxiliary_task`, On Air calls `ctx.llm`
+without a task (your main model, its own reasoning default) and logs it once.
+
+**How the reply travels.** The "recording…" note goes through
+`ctx.post_message` where a session is bound (gateway chats, TUI/Desktop) and
+is edited to "recorded in N s" at the end; on the classic CLI, where nothing
+is bound, it is printed. The episode itself is the command's return value,
+because only a command's reply carries `MEDIA:` attachments (`post_message`
+sends text only, and `inject_message` queues a user turn for the agent).
+The handler is synchronous, so the gateway runs it on its worker pool and
+its event loop is never blocked.
 
 ## Develop
 

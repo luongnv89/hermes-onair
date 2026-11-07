@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 import onair
-from onair import cli, commands, personas, router, sidecar
+from onair import cli, commands, episode, personas, router, sidecar
 
 
 class StrictContext:
@@ -73,14 +73,14 @@ def calls(monkeypatch, tmp_path):
     return seen
 
 
-def test_register_adds_the_cli_command_the_slash_command_and_the_tts_provider():
+def test_register_adds_the_cli_command_the_slash_command_the_tool_and_the_tts_provider():
     ctx = StrictContext()
     onair.register(ctx)
     assert [c["name"] for c in ctx.cli_commands] == ["onair"]
     (slash,) = ctx.commands
     assert slash["name"] == "onair" and callable(slash["handler"])
     assert slash["args_hint"] == commands.ARGS_HINT and "voice" in slash["description"]
-    assert ctx.tools == [] and ctx.hooks == []
+    assert ctx.tools == ["onair_episode"] and ctx.hooks == []
     assert callable(ctx.cli_commands[0]["handler_fn"])
     (provider,) = ctx.tts_providers
     assert isinstance(provider, router.OnAirTTS) and provider.name == "onair"
@@ -92,6 +92,7 @@ def test_register_touches_nothing_else():
             self.n = 0
             self.providers = []
             self.slash = []
+            self.tools = []
 
         def register_cli_command(self, **kwargs):
             self.n += 1
@@ -102,8 +103,18 @@ def test_register_touches_nothing_else():
         def register_tts_provider(self, provider):
             self.providers.append(provider)
 
+        def register_tool(self, name, toolset, schema, handler, **kwargs):
+            self.tools.append(name)
+
         def get_config(self, key, default=None):
             raise AssertionError("settings are read when they are used, not at register()")
+
+        @property
+        def llm(self):
+            raise AssertionError("ctx.llm is read when an episode is made, not at register()")
+
+        def post_message(self, text):
+            raise AssertionError("nothing is posted at register()")
 
         @property
         def profile_name(self):
@@ -112,6 +123,7 @@ def test_register_touches_nothing_else():
     ctx = Bare()
     onair.register(ctx)  # any other attribute access would raise AttributeError
     assert ctx.n == 1 and len(ctx.providers) == 1 and ctx.slash == ["onair"]
+    assert ctx.tools == ["onair_episode"]
 
 
 def test_the_provider_reads_settings_through_the_context(tmp_path, monkeypatch):
@@ -212,3 +224,49 @@ def test_the_slash_command_and_the_provider_read_the_profile_per_call(monkeypatc
     assert claimed["forge"] != claimed["mail"]
     provider = ctx.tts_providers[0]
     assert provider._profile_name() == "custom" and ctx.reads == 3
+
+
+class TaskContext(StrictContext):
+    """A host with ``register_auxiliary_task`` (hermes_cli/plugins.py)."""
+
+    def __init__(self, refuse=False):
+        super().__init__()
+        self.aux_tasks: list[tuple] = []
+        self.refuse = refuse
+
+    def register_auxiliary_task(self, key, *, display_name, description, defaults=None,
+                                inherit_from=None):
+        if self.refuse:
+            raise ValueError("key taken")
+        self.aux_tasks.append((key, display_name, description, defaults, inherit_from))
+
+
+def test_register_adds_the_reasoning_off_script_task():
+    ctx = TaskContext()
+    onair.register(ctx)
+    ((key, name, description, defaults, inherit),) = ctx.aux_tasks
+    assert key == "onair_script" and name and description and inherit is None
+    assert defaults == {"reasoning_effort": "none"}  # no provider or model: no override
+
+
+@pytest.mark.parametrize("ctx_factory", [StrictContext, lambda: TaskContext(refuse=True)])
+def test_register_still_loads_without_the_task(ctx_factory):
+    ctx = ctx_factory()
+    onair.register(ctx)
+    assert ctx.tools == ["onair_episode"] and [c["name"] for c in ctx.commands] == ["onair"]
+
+
+def test_the_host_binding_carries_the_task_only_when_registered(monkeypatch):
+    seen = []
+    real = episode.Host
+
+    def spy(*args, **kwargs):
+        host = real(*args, **kwargs)
+        seen.append(host.script_task)
+        return host
+
+    monkeypatch.setattr(episode, "Host", spy)
+    onair.register(TaskContext())
+    onair.register(StrictContext())
+    onair.register(TaskContext(refuse=True))
+    assert seen == ["onair_script", None, None]

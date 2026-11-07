@@ -7,7 +7,7 @@ from pathlib import Path
 import yaml
 
 import onair
-from onair import router, sidecar
+from onair import episode, router, sidecar
 
 from test_register import StrictContext
 
@@ -42,13 +42,19 @@ def test_config_schema_shape():
 
 def test_config_schema_matches_the_code():
     schema = MANIFEST["config_schema"]
-    assert set(schema) == {"uv_bin", "sidecar_python", "ffmpeg_bin", "language", "voices"}
+    assert set(schema) == {
+        "uv_bin", "sidecar_python", "ffmpeg_bin", "language", "voices", "episode_minutes",
+        "keep_episodes",
+    }
     assert schema["uv_bin"]["default"] == sidecar.DEFAULT_UV_BIN
     assert schema["sidecar_python"]["default"] == sidecar.DEFAULT_SIDECAR_PYTHON
     assert schema["ffmpeg_bin"]["default"] == router.DEFAULT_FFMPEG_BIN
     assert schema["language"]["default"] == router.DEFAULT_LANGUAGE
     assert schema["voices"] == {**schema["voices"], "type": "dict", "default": {}}
-    source = "".join((ROOT / name).read_text(encoding="utf-8") for name in ("cli.py", "router.py"))
+    assert schema["episode_minutes"]["default"] == episode.DEFAULT_MINUTES
+    assert schema["keep_episodes"]["default"] == episode.KEEP_EPISODES
+    names = ("cli.py", "router.py", "episode.py")
+    source = "".join((ROOT / name).read_text(encoding="utf-8") for name in names)
     for key in schema:
         assert f'"{key}"' in source, f"{key} is declared but never read"
 
@@ -56,12 +62,13 @@ def test_config_schema_matches_the_code():
 def test_provides_match_what_register_registers():
     ctx = StrictContext()
     onair.register(ctx)
-    assert MANIFEST.get("provides_tools", []) == ctx.tools == []
+    assert MANIFEST.get("provides_tools", []) == ctx.tools == ["onair_episode"]
     assert MANIFEST.get("provides_hooks", []) == ctx.hooks == []
     assert [c["name"] for c in ctx.cli_commands] == ["onair"]
     # Hermes has no provides_* key for slash commands either; the description names it.
     assert [c["name"] for c in ctx.commands] == ["onair"]
     assert "/onair voice" in MANIFEST["description"]
+    assert "/onair <link or text>" in MANIFEST["description"]
     # Hermes has no provides_* key for TTS providers; the description names it.
     assert [p.name for p in ctx.tts_providers] == ["onair"]
     assert "tts.provider: onair" in MANIFEST["description"]

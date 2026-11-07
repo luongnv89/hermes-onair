@@ -6,8 +6,16 @@ description: >-
   Fish and HeyGen models (price-checked before every call), then edge-tts
   for private use. Each profile speaks as its own persona from a pool of
   10, claimed on first use; `/onair voice` shows it, `/onair voice list`
-  lists the pool and `/onair voice set <name>` changes it. `hermes onair
-  setup` installs the pinned DropCast sidecar that renders edge-tts.
+  lists the pool and `/onair voice set <name>` changes it. `/onair <link or
+  text>` and the `onair_episode` agent tool turn a link or text into a
+  two-host episode (MP3 plus a WebVTT transcript); its script is written by
+  your own configured model through ctx.llm (its cost follows your model
+  choice), via the plugin's auxiliary task `onair_script` (reasoning off by
+  default; no provider or model override; `auxiliary.onair_script` in
+  config.yaml overrides it), or by a built-in template when that fails.
+  `hermes onair setup`
+  installs the pinned DropCast sidecar that ingests, checks and finishes
+  episodes and renders edge-tts.
 author: Luong NGUYEN
 license: MIT
 manifest_version: 2
@@ -19,10 +27,14 @@ tags: [tts, voice, podcast]
 # (`hermes onair setup`), so Hermes installs nothing for this plugin.
 python_runtime: external
 # register() registers the `hermes onair` CLI command, the `/onair` slash
-# command (ctx.register_command) and the `onair` TTS provider
-# (ctx.register_tts_provider). Hermes has no provides_* key for any of
-# them: no tools, no hooks.
-provides_tools: []
+# command (ctx.register_command), the `onair` TTS provider
+# (ctx.register_tts_provider) and the `onair_episode` agent tool
+# (ctx.register_tool). It also registers the auxiliary LLM task
+# `onair_script` (ctx.register_auxiliary_task; defaults: reasoning_effort
+# none, no provider or model). Hermes has no provides_* key for the CLI
+# command, the slash command, the TTS provider or auxiliary tasks.
+provides_tools:
+  - onair_episode
 provides_hooks: []
 config_schema:
   uv_bin:
@@ -57,3 +69,16 @@ config_schema:
       {edge: {fr: fr-FR-HenriNeural}, heygen: {"*": tabitha}}; "*" is any
       other language. They win over the profile's persona; unset entries
       use the persona, then the built-in defaults.
+  episode_minutes:
+    type: float
+    default: 1.0
+    description: >-
+      Target length of an `/onair` episode in minutes (1 to 5), when the
+      request names none. The script is capped at about 150 spoken words
+      per minute of it.
+  keep_episodes:
+    type: int
+    default: 30
+    description: >-
+      How many episode folders to keep under the plugin data dir; older ones
+      are removed after each new episode. 0 keeps every episode.
