@@ -846,7 +846,9 @@ def reply(made: Standup) -> str:
     """The chat reply, ending with the ``MEDIA:`` line."""
     length = f"{made.duration_s:.0f} s" if made.duration_s else "length unknown"
     cast_line = ", ".join(f"{s['profile']} as {s['persona']}" for s in made.segments)
-    lines = [f"On Air standup: {len(made.segments)} profiles ({length}, {made.language}). "
+    count = len(made.segments)
+    lines = [f"On Air standup: {count} profile{'s' if count != 1 else ''} ({length}, "
+             f"{made.language}). "
              f"{cast_line}."]
     voices = ", ".join(f"{s['profile']} {s['voice']}" for s in made.segments)
     voice_line = f"Voices: {episode.ENGINE_LABEL.get(made.engine, made.engine)}: {voices}."

@@ -833,6 +833,8 @@ def test_the_show_opens_and_closes_with_plugin_lines_in_the_first_voice(root):
         assert word not in lines[0] and word not in lines[-1]
     texts = [part["text"] for part in sidecar.finishes[0]["parts"]]
     assert texts[0] == lines[0] and texts[-1] == lines[-1]
+    one = run(host_for(root, Sidecar()), ["coder"])
+    assert standup.reply(one).startswith("On Air standup: 1 profile (42 s, en). coder as Maya.")
     assert standup.opening_line(1, datetime.fromtimestamp(NOW)).endswith("one agent reports.")
     # Short: 3 agents' segments plus both lines stay under about a minute of speech.
     assert sum(len(t.split()) for t in lines) <= 150
