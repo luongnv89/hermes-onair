@@ -17,7 +17,7 @@ __version__ = "0.1.0"
 def register(ctx) -> None:
     # Imported here, not at module level: importing the package stays free of
     # side effects, and pytest can import this file on its own.
-    from . import cli, commands, episode, router, tool
+    from . import cli, commands, episode, router, tool, writer
 
     def profile_name():
         # Read per call, never at register(): it follows HERMES_HOME and any
@@ -41,7 +41,8 @@ def register(ctx) -> None:
     def post(text):
         return ctx.post_message(text)
 
-    host = episode.Host(cli.resolve_data_dir, profile_name, ctx.get_config, llm)
+    host = episode.Host(cli.resolve_data_dir, profile_name, ctx.get_config, llm,
+                        script_task=_register_script_task(ctx, writer))
     ctx.register_command(
         commands.COMMAND,
         commands.make_handler(cli.resolve_data_dir, profile_name, ctx.get_config,
@@ -57,3 +58,27 @@ def register(ctx) -> None:
         description=tool.DESCRIPTION,
         emoji=tool.EMOJI,
     )
+
+
+def _register_script_task(ctx, writer) -> str | None:
+    """Register the ``onair_script`` auxiliary task; its key, or None on an older host.
+
+    Its defaults turn reasoning off and name no provider or model, so the call
+    still runs on the user's main model (AGENTS.md rule 1: no override). The
+    user's ``auxiliary.onair_script`` config block overrides them.
+    """
+    register = getattr(ctx, "register_auxiliary_task", None)
+    if not callable(register):
+        writer.note_no_task("this Hermes has no ctx.register_auxiliary_task")
+        return None
+    try:
+        register(
+            writer.SCRIPT_TASK,
+            display_name=writer.SCRIPT_TASK_NAME,
+            description=writer.SCRIPT_TASK_DESCRIPTION,
+            defaults=dict(writer.SCRIPT_TASK_DEFAULTS),
+        )
+    except Exception as exc:  # a refused key must not stop the plugin from loading
+        writer.note_no_task(f"registering {writer.SCRIPT_TASK} failed ({type(exc).__name__})")
+        return None
+    return writer.SCRIPT_TASK

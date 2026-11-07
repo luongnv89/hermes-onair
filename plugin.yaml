@@ -10,7 +10,10 @@ description: >-
   text>` and the `onair_episode` agent tool turn a link or text into a
   two-host episode (MP3 plus a WebVTT transcript); its script is written by
   your own configured model through ctx.llm (its cost follows your model
-  choice), or by a built-in template when that fails. `hermes onair setup`
+  choice), via the plugin's auxiliary task `onair_script` (reasoning off by
+  default; no provider or model override; `auxiliary.onair_script` in
+  config.yaml overrides it), or by a built-in template when that fails.
+  `hermes onair setup`
   installs the pinned DropCast sidecar that ingests, checks and finishes
   episodes and renders edge-tts.
 author: Luong NGUYEN
@@ -26,7 +29,10 @@ python_runtime: external
 # register() registers the `hermes onair` CLI command, the `/onair` slash
 # command (ctx.register_command), the `onair` TTS provider
 # (ctx.register_tts_provider) and the `onair_episode` agent tool
-# (ctx.register_tool). Hermes has no provides_* key for the first three.
+# (ctx.register_tool). It also registers the auxiliary LLM task
+# `onair_script` (ctx.register_auxiliary_task; defaults: reasoning_effort
+# none, no provider or model). Hermes has no provides_* key for the CLI
+# command, the slash command, the TTS provider or auxiliary tasks.
 provides_tools:
   - onair_episode
 provides_hooks: []

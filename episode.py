@@ -278,6 +278,7 @@ def make_episode(
     ffmpeg_setting: Any = "",
     tools: Tools | None = None,
     keep: int = KEEP_EPISODES,
+    script_task: str | None = None,
 ) -> Episode:
     """Run the whole pipeline; raise :class:`EpisodeError` when no episode can be made."""
     tools = tools or Tools()
@@ -311,7 +312,7 @@ def make_episode(
     t1 = clock()
     llm_error: str | None = None
     try:
-        draft = writer.llm_draft(llm, brief, source, sleep=tools.sleep)
+        draft = writer.llm_draft(llm, brief, source, sleep=tools.sleep, task=script_task)
     except writer.ScriptFailed as exc:
         llm_error = str(exc)
         draft = None
@@ -451,12 +452,17 @@ def prune(episodes: Path, keep: int, *, current: Path | None = None) -> list[Pat
 
 
 def _job_inside(job: str | None, root: Path) -> Path:
-    """The job folder the engine named, which must be a folder inside *root*."""
+    """The job folder the engine named: an existing folder strictly inside *root*."""
     if not job:
         raise EpisodeError("the engine named no job folder")
     path = Path(job).resolve()
-    if not path.is_relative_to(Path(root).resolve()) or not path.is_dir():
+    base = Path(root).resolve()
+    if not path.is_relative_to(base):
         raise EpisodeError("the engine named a job folder outside this episode's folder")
+    if path == base:
+        raise EpisodeError("the engine named the episode's own folder as its job folder")
+    if not path.is_dir():
+        raise EpisodeError("the engine named a job folder that does not exist")
     return path
 
 
@@ -541,6 +547,7 @@ class Host:
     get_config: Callable[..., Any] | None = None
     llm: Callable[[], Any] | None = None
     tools: Tools | None = None
+    script_task: str | None = None  # the registered auxiliary task, or None (main path)
 
     def setting(self, key: str, default: Any) -> Any:
         return _setting(self.get_config, key, default)
@@ -570,4 +577,5 @@ class Host:
         return make_episode(
             request, data_dir=directory, profile=profile, persona=persona, llm=llm,
             ffmpeg_setting=self.setting("ffmpeg_bin", ""), tools=self.tools, keep=keep,
+            script_task=self.script_task,
         )

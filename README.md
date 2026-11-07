@@ -194,6 +194,8 @@ id and the timings.
    the model fails (free models often answer HTTP 429), a built-in template
    built from sentences of the source is used instead (never a sentence
    with a link, web address, email or phone number), and the reply says so.
+   The call runs through On Air's own auxiliary task, `onair_script` (see
+   below), with reasoning off and a 40 s timeout per attempt.
 3. **Checks**: DropCast's own script checks (show order, fixed lines,
    fact-check quotes, length). An LLM script that fails them is replaced by
    the template.
@@ -211,6 +213,27 @@ id and the timings.
 
 Episodes voiced by edge-tts are for your private listening only: the reply
 says so. Never publish them.
+
+**The `onair_script` task: reasoning off.** On Air registers an auxiliary
+LLM task, `onair_script` ("On Air episode script"), and makes the script call
+through it. Its only default is `reasoning_effort: none`. It names no
+provider or model, so the call still runs on your main model, exactly as
+without it (no override). The setting stops a reasoning model from spending
+the answer's token budget (4096) on thinking: free reasoning models otherwise
+came back with an empty answer. Hermes turns it into `reasoning: {enabled:
+false}` for the request (`thinking: disabled` on Claude). To change it, add an
+`auxiliary.onair_script` block to `config.yaml`; your values override the
+plugin's defaults:
+
+```yaml
+# config.yaml
+auxiliary:
+  onair_script:
+    reasoning_effort: low   # or none (the default), medium, high
+```
+
+On a Hermes without `ctx.register_auxiliary_task`, On Air calls `ctx.llm`
+without a task (your main model, its own reasoning default) and logs it once.
 
 **How the reply travels.** The "recording…" note goes through
 `ctx.post_message` where a session is bound (gateway chats, TUI/Desktop) and

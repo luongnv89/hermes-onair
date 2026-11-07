@@ -13,6 +13,8 @@ The plugin passes no model override and records the model id the call
 returns. Free models are often rate-limited (the spike saw HTTP 429 on 5 of
 6 calls) and ignore length targets (176 words for 110), so:
 
+- the call goes through the plugin's auxiliary task :data:`SCRIPT_TASK`, whose only
+  default turns reasoning off (no provider or model: the user's main model);
 - one retry after :data:`LLM_BACKOFF_S`, each call bounded by :data:`LLM_TIMEOUT_S`;
 - the model writes only the content (thesis, points, counterpoint, a tip, a
   takeaway, an open question); the show's fixed lines come from the brief;
@@ -32,6 +34,7 @@ choice, and the reply says so.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from collections.abc import Callable, Sequence
@@ -40,16 +43,38 @@ from typing import Any
 
 from . import openrouter
 
+log = logging.getLogger("onair")
+
 PARTS = ("teaser", "intro", "main", "counter", "corner", "takeaway", "question", "outro")
 ASKER = "asker"
 EXPLAINER = "explainer"
 
-LLM_TIMEOUT_S = 25.0
+#: Per call. The answer is about 600-1000 tokens of JSON; at the 30-50 tokens/s of
+#: free endpoints that is 12-33 s plus queueing, so 40 s fits it with reasoning off
+#: (the ``onair_script`` task). ``LLM_MAX_TOKENS`` is headroom for a model that reasons
+#: anyway, not a target: 4096 tokens would take 80 s or more, and past 40 s the
+#: template is the better episode. Two attempts stay inside the 90 s episode budget
+#: only when the first fails fast (a 429); a slow model costs one long wait.
+LLM_TIMEOUT_S = 40.0
 LLM_BACKOFF_S = 6.0
 #: The longest Retry-After honoured before the retry (the episode has a time budget).
 LLM_RETRY_AFTER_CAP_S = 10.0
 LLM_ATTEMPTS = 2  # one call and one retry
-#: Room for a reasoning model's thinking plus the answer (about 400 words of JSON).
+
+#: The plugin's own auxiliary task for the script call (``ctx.register_auxiliary_task``).
+#: Its defaults name no provider or model, so it routes to the user's main model like
+#: ``task=None`` (rule 1: no override); it only turns reasoning off, so a reasoning
+#: model answers within ``LLM_MAX_TOKENS`` instead of spending it on thinking. The
+#: user's ``auxiliary.onair_script`` block in config.yaml overrides these defaults.
+SCRIPT_TASK = "onair_script"
+SCRIPT_TASK_NAME = "On Air episode script"
+SCRIPT_TASK_DESCRIPTION = (
+    "Writes the two-host script for /onair and onair_episode on your main model, "
+    "with reasoning off so the answer fits its token budget."
+)
+SCRIPT_TASK_DEFAULTS: dict[str, Any] = {"reasoning_effort": "none"}
+#: Headroom over the answer (about 400 words of JSON, 600-1000 tokens) for a model
+#: that reasons even with the ``onair_script`` task's reasoning off.
 LLM_MAX_TOKENS = 4096
 EXCERPT_CHARS = 6000
 WORDS_PER_MINUTE = 150
@@ -418,7 +443,10 @@ SCHEMA: dict[str, Any] = {
                          "properties": {"text": {"type": "string"}, "quote": {"type": "string"}}}},
 }
 
-_SOURCE_TAG = re.compile(r"</?\s*source\s*>", re.IGNORECASE)
+#: Any spelling of a ``source`` tag: ``</source x="1">``, ``< /source>``, ``</source/>``,
+#: ``<source lang="en">``, any case, and the fullwidth ``＜/source＞``. Within one line,
+#: so a stray ``<source`` never swallows the text after it.
+_SOURCE_TAG = re.compile(r"[<＜]\s*[/／]?\s*source\b\s*[^<>＜＞\n]{0,200}[>＞]", re.IGNORECASE)
 
 
 def source_block(excerpt: str) -> str:
@@ -654,6 +682,17 @@ def _reason(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {text[:200]}" if text else type(exc).__name__
 
 
+_NO_TASK_LOGGED = False
+
+
+def note_no_task(why: str) -> None:
+    """Log, once per process, that the script call runs without its auxiliary task."""
+    global _NO_TASK_LOGGED
+    if not _NO_TASK_LOGGED:
+        _NO_TASK_LOGGED = True
+        log.info("onair: the script call uses the main-model path (task=None): %s", why)
+
+
 def _delay(error: str, backoff: float, attempt: int) -> float:
     """The wait before a retry: a Retry-After the error names (up to the cap), else backoff."""
     match = _RETRY_AFTER.search(error or "")
@@ -671,12 +710,16 @@ def llm_draft(
     timeout: float = LLM_TIMEOUT_S,
     attempts: int = LLM_ATTEMPTS,
     backoff: float = LLM_BACKOFF_S,
+    task: str | None = None,
 ) -> Draft:
     """Ask ``ctx.llm`` for the content (one retry with backoff); raise :class:`ScriptFailed`.
 
     The call carries :data:`SCHEMA`. When the host rejects an answer against it,
     the retry asks for plain JSON (``json_mode``) instead, so an answer the
     schema check refused (a top-level list, say) can still be read here.
+    *task* is the plugin's registered auxiliary task (:data:`SCRIPT_TASK`); None
+    calls the main-model path. A host whose ``complete_structured`` takes no
+    ``task`` gets the call without it (logged once).
     """
     if llm is None:
         raise ScriptFailed("no ctx.llm in this Hermes")
@@ -690,15 +733,28 @@ def llm_draft(
             sleep(_delay(errors[-1] if errors else "", backoff, attempt))
         shape = {"json_mode": True} if schema_rejected else {
             "json_schema": SCHEMA, "schema_name": "onair_episode"}
-        try:
-            result = llm.complete_structured(
+
+        def call(shape: dict[str, Any] = shape, **routing: Any) -> Any:
+            return llm.complete_structured(
                 instructions=prompt,
                 input=[{"type": "text", "text": source_block(excerpt)}],
                 **shape,
+                **routing,
                 max_tokens=LLM_MAX_TOKENS,
                 timeout=timeout,
                 purpose="On Air episode script",
             )
+
+        try:
+            try:
+                result = call(task=task) if task else call()
+            except TypeError as exc:
+                if not task or "task" not in str(exc):
+                    raise
+                # An older host: no ``task`` argument. Same attempt, main-model path.
+                note_no_task(f"ctx.llm.complete_structured takes no task ({exc})")
+                task = None
+                result = call()
         except Exception as exc:  # the host raises its own error types (429, auth, timeout)
             reason = _reason(exc)
             schema_rejected = schema_rejected or _SCHEMA_REJECTED in reason
