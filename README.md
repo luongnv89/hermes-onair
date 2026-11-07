@@ -254,6 +254,11 @@ its event loop is never blocked.
 /onair standup coder research  # some of them (each must be listed)
 ```
 
+After `standup`, words count as profile names only when each one is listed
+in `standup_profiles` or names an existing profile folder (an unlisted one
+is then refused). Anything else is recorded as an episode text, as before:
+`/onair standup is great` makes an episode about that text.
+
 Each listed profile reports its last 24 hours in a short segment (2 to 4
 sentences) spoken in **its own persona's voice**, and DropCast's finish step
 joins the segments with the show's theme and loudness. The reply follows
@@ -269,10 +274,15 @@ joins the segments with the show's theme and loudness. The reply follows
   anything is opened; so is every profile when the list is empty.
 - **Read-only.** A profile's history is its own `state.db`
   (`$HERMES_ROOT/state.db` for `default`, `$HERMES_ROOT/profiles/<name>/state.db`
-  otherwise), opened with SQLite's `mode=ro` URI (plus `immutable=1` for an
-  idle WAL database, so SQLite creates no side files there) and
-  `PRAGMA query_only`: it is never written, write-locked, or given new files. A `state.db`, a profile folder or a
-  `profiles` folder that is a symbolic link is never followed.
+  otherwise), opened with SQLite's `mode=ro` URI and `PRAGMA query_only`:
+  the database is never written or write-locked. A WAL database is opened
+  `immutable=1` unless both its `-wal` and `-shm` exist, so SQLite adds no
+  side file to the profile's folder; only in a few-millisecond race (a
+  Hermes writer closing at that moment) can SQLite's own `-wal`/`-shm` index
+  files be left there, never with plugin data.
+- **No links.** A `state.db`, a profile folder or a `profiles` folder that is
+  a symbolic link is never followed; such a profile's history and its claim
+  are not read.
 - **Titles only.** Only the titles (and a summary, where the table has one)
   of sessions active in the last 24 hours are read: never a message, a
   prompt or a tool output.
@@ -293,13 +303,19 @@ with `OPENROUTER_API_KEY`, else edge-tts; a failed segment drops that engine
 and the next one renders the whole show again. The `voices` setting is not
 applied (it would give every profile the same voice).
 
-**Script.** One `ctx.llm` call on your own model (the `onair_script` task,
-reasoning off) writes every segment; when it fails, a template says
-"<Persona> for <profile>. <Profile> worked on: <titles>." A profile with no
+**Script.** The show opens with "This is the On Air standup for <weekday,
+day month>: <N> agents report." and closes with "That's the standup. Back
+tomorrow.": two plugin-written lines in the first profile's voice, with no
+session content. One `ctx.llm` call on your own model (the `onair_script`
+task, reasoning off) writes every segment, with no speaker label (a leading
+"Bob:" is removed); when it fails, a template says "<Persona> for <profile>.
+<Profile> worked on: <titles>." A title that held a secret is left out of
+the template, so "redacted" is never spoken. A profile with no
 session in the last 24 hours gets a one-line "quiet day" segment rather than
 being skipped, so the show accounts for every listed profile; one whose
 `state.db` is missing or unreadable gets a one-line "could not be read"
-segment. The template and these lines are English.
+segment. Segments are capped at 40 words, so 3 agents take about a minute.
+The template and these lines are English.
 
 **The morning standup blueprint.** On a Hermes with
 `ctx.register_automation_blueprint`, On Air adds the `onair:standup`
