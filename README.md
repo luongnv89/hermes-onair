@@ -282,13 +282,21 @@ joins the segments with the show's theme and loudness. The reply follows
   files be left there, never with plugin data.
 - **No links.** A `state.db`, a profile folder or a `profiles` folder that is
   a symbolic link is never followed; such a profile's history and its claim
-  are not read.
+  are not read. A claim is read only from its exact real path in the
+  profile's own folder: a linked `plugin-data` or `onair` folder (the
+  `default` root's included) gives no claim. These checks run just before
+  the open, so only the machine's owner, swapping a folder for a link in
+  that instant, could slip past them (SQLite follows folder links; only the
+  last part of a path is opened `O_NOFOLLOW`).
 - **Titles only.** Only the titles (and a summary, where the table has one)
   of sessions active in the last 24 hours are read: never a message, a
   prompt or a tool output.
 - **Secrets scrubbed.** Anything that looks like a secret (API keys and
-  tokens of the usual shapes, `password=…`-style values, private keys, URLs
-  with a password, long hex or base64 runs) is replaced by "redacted" before
+  tokens of the usual shapes, a password or key given as `key: value` or in
+  prose when the value looks secret (a digit or symbol, quoted, or 12+
+  characters: "password is hunter2", not "password is required"), private
+  keys, URLs with a password, long hex or base64 runs) is replaced by
+  "redacted" before
   the titles reach your model, the voices or any file, and again after the
   model writes the script. File paths, links and emails are dropped from
   titles too.
@@ -304,13 +312,14 @@ and the next one renders the whole show again. The `voices` setting is not
 applied (it would give every profile the same voice).
 
 **Script.** The show opens with "This is the On Air standup for <weekday,
-day month>: <N> agents report." and closes with "That's the standup. Back
+day month>: <N> agents report." (this machine's local date) and closes with "That's the standup. Back
 tomorrow.": two plugin-written lines in the first profile's voice, with no
 session content. One `ctx.llm` call on your own model (the `onair_script`
 task, reasoning off) writes every segment, with no speaker label (a leading
 "Bob:" is removed); when it fails, a template says "<Persona> for <profile>.
-<Profile> worked on: <titles>." A title that held a secret is left out of
-the template, so "redacted" is never spoken. A profile with no
+<Profile> worked on: <titles>." A title that held a secret is never sent to
+the model and is left out of the template, and a model sentence that says
+"redacted" is dropped, so "redacted" is never spoken. A profile with no
 session in the last 24 hours gets a one-line "quiet day" segment rather than
 being skipped, so the show accounts for every listed profile; one whose
 `state.db` is missing or unreadable gets a one-line "could not be read"
