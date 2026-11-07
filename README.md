@@ -197,7 +197,8 @@ episode.
 Apart from the speech file Hermes asks `text_to_speech` to write, On Air
 writes only under `$HERMES_HOME/plugin-data/onair/`: the sidecar, episodes,
 standups, the profile's persona claim and the model-list cache. During
-setup, uv also uses its own cache (`~/.cache/uv`) and Python store. It runs no
+setup, uv also uses its own cache (for example `~/.cache/uv`) and Python
+store. It runs no
 background service and sends no telemetry.
 
 **What any profile reads.** To keep voices distinct, claiming a persona and
@@ -287,8 +288,8 @@ reply says so.
    the template.
 4. **Render.** One engine renders the whole episode (see
    [Free means](#free-means)). Your profile's persona hosts. The co-host
-   is the next persona of the other voice type, and one with a Fish voice
-   is preferred. The show keeps DropCast's fixed
+   is the next persona of the other voice type. When the host has a Fish
+   voice, a co-host with one is preferred. The show keeps DropCast's fixed
    name, opening and sign-off ("Build Wiz AI Show"), because DropCast's
    checks accept no other.
 5. **Deliver.** It writes `episode.mp3`, `transcript.vtt` and `onair.json`
