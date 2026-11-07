@@ -615,7 +615,8 @@ def _answer(value: Any) -> dict[str, Any] | None:
     return None
 
 
-def _scan(text: str) -> dict[str, Any] | None:
+def _scan(text: str, accept: Callable[[Any], dict[str, Any] | None] = _answer
+          ) -> dict[str, Any] | None:
     """The first top-level JSON object in *text* that is the answer.
 
     Each ``{`` is tried with ``raw_decode``; a decoded object is skipped as a
@@ -631,7 +632,7 @@ def _scan(text: str) -> dict[str, Any] | None:
         except ValueError:
             pos = start + 1
             continue
-        found = _answer(value)
+        found = accept(value)
         if found is not None:
             return found
         pos = end
@@ -646,14 +647,19 @@ def _shape(text: str) -> str:
     return f"{len(text)} chars, starts {json.dumps(preview, ensure_ascii=False)}"
 
 
-def extract(result: Any) -> tuple[dict[str, Any] | None, str | None]:
+def extract(
+    result: Any,
+    accept: Callable[[Any], dict[str, Any] | None] = _answer,
+    wanted: str = "thesis or points",
+) -> tuple[dict[str, Any] | None, str | None]:
     """``(answer, None)`` from the host's result, or ``(None, why)``.
 
     The host's own parse comes first; then the text: ``<think>`` blocks are
     removed, fenced bodies are tried before the whole text, and each is tried
-    as is and with trailing commas removed.
+    as is and with trailing commas removed. *accept* says whether a decoded
+    value is the answer (and unwraps it); *wanted* names its keys in the reason.
     """
-    found = _answer(getattr(result, "parsed", None))
+    found = accept(getattr(result, "parsed", None))
     if found is not None:
         return found, None
     text = getattr(result, "text", "") or ""
@@ -665,7 +671,7 @@ def extract(result: Any) -> tuple[dict[str, Any] | None, str | None]:
         cleaned = cleaned[:unclosed.start()]
     for candidate in [*_FENCE.findall(cleaned), cleaned]:
         for variant in (candidate, _TRAILING_COMMA.sub(r"\1", candidate)):
-            found = _scan(variant)
+            found = _scan(variant, accept)
             if found is not None:
                 return found, None
     if not text.strip():
@@ -673,7 +679,7 @@ def extract(result: Any) -> tuple[dict[str, Any] | None, str | None]:
     elif unclosed:
         why = "the model's answer ended inside its <think> reasoning (token budget too small?)"
     else:
-        why = "the model returned no JSON object with thesis or points"
+        why = f"the model returned no JSON object with {wanted}"
     return None, f"{why} [{_shape(text)}]"
 
 

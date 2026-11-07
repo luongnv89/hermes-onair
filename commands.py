@@ -42,6 +42,14 @@ Voice subcommands (``/voice`` is a Hermes built-in, so they live under ``/onair`
   A persona another profile holds is refused unless ``--force``, which
   changes only this profile's claim (the two then share the voice).
 
+``/onair standup [profiles…]`` records the Agent Standup show (:mod:`standup`):
+each opted-in profile (the ``standup_profiles`` setting) reports its last 24 h
+in its own voice. A profile that is not listed is refused before anything is
+read. ``standup`` alone is the command; so is ``standup`` followed by words
+that each name a listed profile or an existing profile folder (an unlisted
+one is then refused). Anything else after ``standup`` ("standup is great")
+is a text to record as an episode, as before this command existed.
+
 The profile and its home are resolved on every call, as for speech.
 """
 
@@ -53,21 +61,24 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from . import episode, personas, router
+from . import episode, personas, router, standup
 
 log = logging.getLogger("onair")
 
 COMMAND = "onair"
 DESCRIPTION = (
     "On Air: turn a link or text into a two-host audio episode; "
+    "standup [profiles] for the agents' daily standup; "
     "voice, voice list, voice set <name> for this profile's voice"
 )
-ARGS_HINT = "<link|text> | voice [list | set <name> [--force]]"
+ARGS_HINT = "<link|text> | standup [profiles…] | voice [list | set <name> [--force]]"
 USAGE = (
-    "usage: /onair [--lang en|fr|vi] [--minutes N] <link or text> | /onair voice | "
+    "usage: /onair [--lang en|fr|vi] [--minutes N] <link or text> | "
+    "/onair standup [profile …] | /onair voice | "
     "/onair voice list | /onair voice set <name> [--force]"
 )
 RECORDING = "🎙️ On Air is recording your episode… (about a minute)"
+RECORDING_STANDUP = "🎙️ On Air is recording the standup… (about a minute)"
 
 _ENGINE_LABEL = {"fish": "Fish", "heygen": "HeyGen", "edge": "edge-tts"}
 
@@ -181,6 +192,20 @@ def _is_voice_command(args: list[str]) -> bool:
     return False
 
 
+def _is_standup_command(args: list[str], host: episode.Host | None = None) -> bool:
+    """``standup`` alone, or followed by words that all name profiles.
+
+    A word names a profile when it is listed in ``standup_profiles`` or names
+    an existing profile folder (:func:`standup.names_profiles`, a ``stat``
+    only). Otherwise the words are an episode text.
+    """
+    if not args or args[0].lower() != "standup":
+        return False
+    if len(args) == 1:
+        return True
+    return host is not None and standup.names_profiles(host, args[1:])
+
+
 class _Announcer:
     """The "recording…" note: ``post_message`` where a session is bound, else printed."""
 
@@ -232,6 +257,31 @@ def episode_reply(host: episode.Host, raw_args: str,
     return episode.reply(made)
 
 
+def standup_reply(host: episode.Host, names: list[str],
+                  post: Callable[[str], Any] | None = None) -> str:
+    """Record the standup for ``/onair standup [profiles…]``; the reply ends with ``MEDIA:``.
+
+    The opt-in check runs before the "recording…" note and before any read.
+    """
+    try:
+        selected = standup.select(names, standup.opted_in(host.setting(standup.SETTING, [])))
+    except standup.StandupError as exc:
+        return f"On Air standup: {exc}."
+    note = _Announcer(post)
+    note.start(RECORDING_STANDUP)
+    try:
+        made = standup.run(host, selected)
+    except (standup.StandupError, episode.EpisodeError) as exc:
+        note.finish("🎙️ On Air: no standup this time.")
+        return f"On Air could not record the standup: {exc}"
+    except Exception as exc:
+        log.exception("onair: standup failed")
+        note.finish("🎙️ On Air: no standup this time.")
+        return f"On Air could not record the standup (internal error: {type(exc).__name__})."
+    note.finish(f"🎙️ On Air: standup recorded in {made.timings.get('total_s', 0):.0f} s.")
+    return standup.reply(made)
+
+
 def make_handler(
     data_dir: Callable[[], Path],
     profile_name: Callable[[], Any] | None = None,
@@ -250,6 +300,8 @@ def make_handler(
         args = (raw_args or "").split()
         if not args:
             return USAGE
+        if host is not None and _is_standup_command(args, host):
+            return standup_reply(host, args[1:], post)
         if not _is_voice_command(args):
             if host is None:
                 return USAGE

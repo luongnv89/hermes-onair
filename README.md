@@ -3,8 +3,9 @@ On Air: free voices and two-host audio shows for Hermes Agent (Hermes plugin)
 
 > Status: early (v0.1.0). This release ships `hermes onair setup`, the free
 > voice router (`tts.provider: onair`), a distinct voice per profile
-> (`/onair voice`) and two-host episodes (`/onair <link or text>` and the
-> `onair_episode` agent tool); the Agent Standup show comes next.
+> (`/onair voice`), two-host episodes (`/onair <link or text>` and the
+> `onair_episode` agent tool) and the Agent Standup show (`/onair standup`
+> and the `onair_standup` tool).
 
 ## Install
 
@@ -160,7 +161,8 @@ Settings (`plugins.entries.onair.settings` in `config.yaml`):
 | `language` | `auto` | Language of the text (`en`, `fr`, `vi`, …); `auto` detects en/fr/vi. |
 | `voices` | `{}` | Voice per engine and language, e.g. `{edge: {fr: fr-FR-HenriNeural}, heygen: {"*": tabitha}}`. Speech only: an episode's two hosts keep their personas' voices. |
 | `episode_minutes` | `1.0` | Target length of an `/onair` episode (1 to 5 minutes) when the request names none. |
-| `keep_episodes` | `30` | Episode folders kept under the plugin data dir; older ones are removed after each new episode. `0` keeps all. |
+| `keep_episodes` | `30` | Episode folders kept under the plugin data dir; older ones are removed after each new episode (and, separately, each new standup). `0` keeps all. |
+| `standup_profiles` | `[]` | Profiles the Agent Standup may read, e.g. `[default, coder, research]` (`default` is the root profile). Nothing is read for a profile that is not listed. |
 
 ## Episodes: `/onair <link or text>` and `onair_episode`
 
@@ -243,6 +245,97 @@ because only a command's reply carries `MEDIA:` attachments (`post_message`
 sends text only, and `inject_message` queues a user turn for the agent).
 The handler is synchronous, so the gateway runs it on its worker pool and
 its event loop is never blocked.
+
+
+## The Agent Standup: `/onair standup`
+
+```text
+/onair standup                 # every profile in standup_profiles
+/onair standup coder research  # some of them (each must be listed)
+```
+
+After `standup`, words count as profile names only when each one is listed
+in `standup_profiles` or names an existing profile folder (an unlisted one
+is then refused). Anything else is recorded as an episode text, as before:
+`/onair standup is great` makes an episode about that text.
+
+Each listed profile reports its last 24 hours in a short segment (2 to 4
+sentences) spoken in **its own persona's voice**, and DropCast's finish step
+joins the segments with the show's theme and loudness. The reply follows
+`/onair`: "recording…" at once, then the voices, timings and a last line
+`MEDIA:/abs/path.mp3`, with `transcript.vtt` beside it under
+`$HERMES_HOME/plugin-data/onair/standups/<stamp>/`. The agent tool
+`onair_standup` (`profiles`, `scheduled`) runs the same show.
+
+**Privacy: what is read, and what is not.**
+
+- **Opt-in only.** Only profiles listed in `standup_profiles` are read. A
+  profile named on the command line that is not listed is refused before
+  anything is opened; so is every profile when the list is empty.
+- **Read-only.** A profile's history is its own `state.db`
+  (`$HERMES_ROOT/state.db` for `default`, `$HERMES_ROOT/profiles/<name>/state.db`
+  otherwise), opened with SQLite's `mode=ro` URI and `PRAGMA query_only`:
+  the database is never written or write-locked. A WAL database is opened
+  `immutable=1` unless both its `-wal` and `-shm` exist, so SQLite adds no
+  side file to the profile's folder; only in a few-millisecond race (a
+  Hermes writer closing at that moment) can SQLite's own `-wal`/`-shm` index
+  files be left there, never with plugin data.
+- **No links.** A `state.db`, a profile folder or a `profiles` folder that is
+  a symbolic link is never followed; such a profile's history and its claim
+  are not read. A claim is read only from its exact real path in the
+  profile's own folder: a linked `plugin-data` or `onair` folder (the
+  `default` root's included) gives no claim. These checks run just before
+  the open, so only the machine's owner, swapping a folder for a link in
+  that instant, could slip past them (SQLite follows folder links; only the
+  last part of a path is opened `O_NOFOLLOW`).
+- **Titles only.** Only the titles (and a summary, where the table has one)
+  of sessions active in the last 24 hours are read: never a message, a
+  prompt or a tool output.
+- **Secrets scrubbed.** Anything that looks like a secret (API keys and
+  tokens of the usual shapes, a password or key given as `key: value` or in
+  prose when the value looks secret (a digit or symbol, quoted, or 12+
+  characters: "password is hunter2", not "password is required"), private
+  keys, URLs with a password, long hex or base64 runs) is replaced by
+  "redacted" before
+  the titles reach your model, the voices or any file, and again after the
+  model writes the script. File paths, links and emails are dropped from
+  titles too.
+- The titles reach your model as fenced data it is told never to follow.
+
+**Voices.** Each profile speaks as the persona it claimed (its own
+`persona.json`, read only). A profile with no claim, or whose claim an
+earlier segment already speaks with, gets a fixed persona for this show
+only (picked from its name; nothing is written), so every voice is
+distinct. One engine for the whole show, as for episodes: Fish or HeyGen
+with `OPENROUTER_API_KEY`, else edge-tts; a failed segment drops that engine
+and the next one renders the whole show again. The `voices` setting is not
+applied (it would give every profile the same voice).
+
+**Script.** The show opens with "This is the On Air standup for <weekday,
+day month>: <N> agents report." (this machine's local date) and closes with "That's the standup. Back
+tomorrow.": two plugin-written lines in the first profile's voice, with no
+session content. One `ctx.llm` call on your own model (the `onair_script`
+task, reasoning off) writes every segment, with no speaker label (a leading
+"Bob:" is removed); when it fails, a template says "<Persona> for <profile>.
+<Profile> worked on: <titles>." A title that held a secret is never sent to
+the model and is left out of the template, and a model sentence that says
+"redacted" is dropped, so "redacted" is never spoken. A profile with no
+session in the last 24 hours gets a one-line "quiet day" segment rather than
+being skipped, so the show accounts for every listed profile; one whose
+`state.db` is missing or unreadable gets a one-line "could not be read"
+segment. Segments are capped at 40 words, so 3 agents take about a minute.
+The template and these lines are English.
+
+**The morning standup blueprint.** On a Hermes with
+`ctx.register_automation_blueprint`, On Air adds the `onair:standup`
+Automation Blueprint (`/blueprint`, the dashboard gallery): weekdays at a
+time you choose, delivered where you choose. A scheduled standup has no
+requesting user, so it **never uses edge-tts**, whatever the target: only
+OpenRouter's free voices (it needs `OPENROUTER_API_KEY`; without it the run
+says why and sends no audio). The tool also detects a cron run itself.
+
+Standups voiced by edge-tts are for your private listening only: the reply
+says so. Never publish them.
 
 ## Develop
 
