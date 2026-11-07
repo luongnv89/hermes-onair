@@ -49,7 +49,12 @@ hermes onair setup --check        # "Result: OK" when ready
 hermes config set tts.provider onair
 
 # 4. Optional: the free OpenRouter voices. Without a key, On Air uses edge-tts.
-export OPENROUTER_API_KEY=sk-or-...   # or a line in ~/.hermes/.env
+#    Export it, or add it to $HERMES_HOME/.env, which Hermes loads into its environment.
+export OPENROUTER_API_KEY=sk-or-...
+
+# 5. If a gateway is running (Telegram, Discord, …), restart it, so that it
+#    loads the plugin and sees the key.
+hermes gateway restart
 ```
 
 Then, in any Hermes chat (CLI, TUI, Telegram, Discord, …):
@@ -63,8 +68,6 @@ The episode arrives about a minute later as an audio attachment, with its
 transcript. From a shell, `hermes chat -q "/onair voice"` runs one command
 and exits. On the CLI, the reply's last line is the MP3's path.
 
-- **Restart a running gateway** (`hermes gateway restart`) after installing,
-  so it loads the plugin.
 - **Check the install** with `hermes plugins list` (onair shows as
   `enabled`), `hermes plugins doctor onair` and `hermes onair setup --check`.
 - **`hermes onair setup` is safe to run again.** A sidecar already at the pin
@@ -79,7 +82,7 @@ and exits. On the CLI, the reply's last line is the MP3's path.
 | `/onair voice` | Shows this profile's persona and its voice on each engine. It claims a persona on first use. | `/onair voice` |
 | `/onair voice list` | Lists the 10 personas and which profile holds each. | `/onair voice list` |
 | `/onair voice set <name> [--force]` | Changes this profile's persona. `--force` shares one that another profile holds. | `/onair voice set maya` |
-| `/onair standup [profiles…]` | Records the Agent Standup: each opted-in profile reports its last 24 hours in its own voice. | `/onair standup default coder research` |
+| `/onair standup [profiles…]` | Records the Agent Standup: each opted-in profile reports its last 24 hours in its own voice. Each name must be a listed profile or an existing profile folder. Any other words make it an episode about that text. | `/onair standup default coder research` |
 | `onair_episode` (agent tool) | The same pipeline as `/onair`, for the agent. Parameters: `source`, `language`, `minutes`. Returns JSON with a `MEDIA:` line. | "Make me a 2-minute episode about this article: …" |
 | `onair_standup` (agent tool) | The same show as `/onair standup`. Parameters: `profiles`, `scheduled`. | "Run the On Air standup." |
 | `tts.provider: onair` | Hermes's own `text_to_speech` speaks through On Air, in the profile's persona. | `hermes config set tts.provider onair` |
@@ -138,7 +141,9 @@ The script model is set by the `auxiliary.onair_script` setting. See
 
 ## Free means
 
-On Air never calls a paid model, service or engine.
+On Air never calls a paid model, service or engine of its own. The scripts
+run on your own configured model, so that cost follows your choice (see the
+last point below).
 
 **The engines, in fallback order.** One engine speaks each request: the
 first one in the chain that works. Engines are never mixed within one
@@ -169,8 +174,10 @@ episode.
   **unofficial** client for Microsoft Edge's read-aloud voices. **Its output
   is for private use only.** Delivering it to the requesting user's own chat
   or session is fine. Never publish it: no public post, plugin catalog entry,
-  demo, or release asset. On Air says so in every reply voiced by edge-tts,
-  and a scheduled standup, which has no requesting user, never uses it.
+  demo, or release asset. On Air says so in every `/onair` episode and
+  standup reply voiced by edge-tts. Plain `text_to_speech` carries no such
+  notice, so treat that speech as private too. A scheduled standup, which
+  has no requesting user, never uses edge-tts.
 - **Your own model** writes the scripts through Hermes (`ctx.llm`), so that
   cost follows your model choice. See below.
 
@@ -185,22 +192,30 @@ episode.
 | Your configured model, through Hermes `ctx.llm` | The source text, or the standup's session titles | Every episode and standup |
 | The web page you name | A fetch of that page, made by DropCast | `/onair <link>` |
 | GitHub, over SSH | The DropCast install | `hermes onair setup` |
+| PyPI, and uv's Python downloads | DropCast's dependencies, and a Python if none fits | `hermes onair setup` |
 
 Apart from the speech file Hermes asks `text_to_speech` to write, On Air
 writes only under `$HERMES_HOME/plugin-data/onair/`: the sidecar, episodes,
-standups, the profile's persona claim and the model-list cache. It runs no
+standups, the profile's persona claim and the model-list cache. During
+setup, uv also uses its own cache (`~/.cache/uv`) and Python store. It runs no
 background service and sends no telemetry.
+
+**What any profile reads.** To keep voices distinct, claiming a persona and
+`/onair voice list` read the other profiles' claim files
+(`plugin-data/onair/persona.json` in each profile of the same Hermes root).
+They only read those files, and they never write another profile's. Nothing
+else outside the profile's own data is read, except by the standup.
 
 **What the Agent Standup reads.**
 
 - **Opt-in only.** It reads only profiles listed in `standup_profiles`. A
   profile named on the command line but not listed is refused before
   anything is opened, and so is every profile while the list is empty.
-- **Read-only.** It reads each profile's own `state.db`
-  (`$HERMES_ROOT/state.db` for `default`,
-  `$HERMES_ROOT/profiles/<name>/state.db` otherwise). The database is opened
-  with SQLite's `mode=ro` and `PRAGMA query_only`, and it is never written or
-  locked. Symbolic links are never followed.
+- **Read-only.** It reads each profile's own `state.db`: `<root>/state.db`
+  for `default` and `<root>/profiles/<name>/state.db` otherwise, where
+  `<root>` is the Hermes root (`~/.hermes` by default). The database is
+  opened with SQLite's `mode=ro` and `PRAGMA query_only`, and it is never
+  written or write-locked. Symbolic links are never followed.
 - **Titles only.** It reads the titles, and summaries where they exist, of
   sessions active in the last 24 hours. It never reads a message, a prompt
   or a tool output.
@@ -271,8 +286,9 @@ reply says so.
    fact-check quotes and the length. A script that fails them is replaced by
    the template.
 4. **Render.** One engine renders the whole episode (see
-   [Free means](#free-means)). Your profile's persona hosts, and the next
-   persona of the other voice type co-hosts. The show keeps DropCast's fixed
+   [Free means](#free-means)). Your profile's persona hosts. The co-host
+   is the next persona of the other voice type, and one with a Fish voice
+   is preferred. The show keeps DropCast's fixed
    name, opening and sign-off ("Build Wiz AI Show"), because DropCast's
    checks accept no other.
 5. **Deliver.** It writes `episode.mp3`, `transcript.vtt` and `onair.json`
@@ -323,7 +339,8 @@ persona.
 ### The Agent Standup
 
 The show opens with "This is the On Air standup for <weekday, day month>:
-<N> agents report." and closes with "That's the standup. Back tomorrow."
+three agents report." (the count is spoken as a word) and closes with
+"That's the standup. Back tomorrow."
 Between those lines, each listed profile speaks a segment of 2 to 4
 sentences, at most 40 words, in its own persona's voice. One `ctx.llm` call
 (the `onair_script` task) writes every segment. When that call fails, a
