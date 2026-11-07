@@ -545,7 +545,8 @@ def test_no_secret_reaches_the_model_the_voices_or_any_file(root):
                     if p.is_file() and p.suffix in (".json", ".txt", ".vtt"))
     for secret in [*SECRETS, "hunter2"]:
         assert secret not in seen and secret not in spoken and secret not in files
-    assert "redacted" in seen
+    # A title that held a secret is never sent to the model at all (not even redacted).
+    assert "redacted" not in seen and "Deploy with key" not in seen
 
 
 # ------------------------------------------------------------------- script
@@ -801,7 +802,7 @@ def test_the_template_never_says_redacted(root):
     ("the wifi password is hunter2", "hunter2"),
     ("admin password was Tr0ub4dor", "Tr0ub4dor"),
     ("secret key: mysecret99", "mysecret99"),
-    ("access key is AKIAFAKE", "AKIAFAKE"),
+    ("access key is wJalrXUtnFEMI/K7MDENG", "wJalrXUtnFEMI/K7MDENG"),
 ])
 def test_spaced_and_prose_secrets_are_scrubbed(text, secret):
     out = standup.scrub_secrets(text)
@@ -838,3 +839,97 @@ def test_the_show_opens_and_closes_with_plugin_lines_in_the_first_voice(root):
     assert standup.opening_line(1, datetime.fromtimestamp(NOW)).endswith("one agent reports.")
     # Short: 3 agents' segments plus both lines stay under about a minute of speech.
     assert sum(len(t.split()) for t in lines) <= 150
+
+
+# ------------------------------------------------------------ review round 2
+
+
+@pytest.mark.parametrize("profile, link", [
+    ("default", "plugin-data"), ("default", "plugin-data/onair"),
+    ("coder", "plugin-data"), ("coder", "plugin-data/onair"),
+])
+def test_a_claim_folder_linked_into_another_profile_is_never_read(tmp_path, monkeypatch,
+                                                                  profile, link):
+    base = tmp_path / "hermes"
+    ops = base / "profiles" / "ops"
+    seed(ops / "state.db", [("ops secret plan", NOW - HOUR, NOW - HOUR)])
+    personas.write_record(personas.claim_path_of(ops), {"persona": "weston", "profile": profile})
+    home = base if profile == "default" else base / "profiles" / profile
+    seed(home / "state.db", [("Own work", NOW - HOUR, NOW - HOUR)])
+    target = ops / link
+    (home / link).parent.mkdir(parents=True, exist_ok=True)
+    (home / link).symlink_to(target, target_is_directory=True)
+    opened = Opened(monkeypatch)
+    (cast,) = standup.cast(base, [profile])
+    history = standup.read_history(base, profile, NOW)
+    assert cast.how == "show-only" and cast.persona.name != "Weston"
+    assert history.titles == ["Own work"]  # its own state.db is still read
+    assert [p for p in opened.paths if Path(p).resolve().is_relative_to(ops.resolve())] == []
+
+
+def test_the_default_profile_still_reads_its_own_claim(root):
+    (cast, *_) = standup.cast(root, LISTED)
+    assert (cast.profile, cast.persona.name, cast.how) == ("default", "Bob", "claim")
+
+
+@pytest.mark.parametrize("cast_id, profile, text", [
+    ("bob", "default", "Bob-sled race notes were my main work today."),
+    ("bob", "default", "Default-branch cleanup was most of my day."),
+    ("sam", "ops", "Ops-level metrics dashboard got a refresh from me today."),
+])
+def test_a_hyphenated_first_word_is_not_a_speaker_label(cast_id, profile, text):
+    cast = standup.Cast(profile, personas.BY_ID[cast_id], "claim")
+    assert standup.tidy_segment(text, cast) == text
+
+
+@pytest.mark.parametrize("text", [
+    "Bob - I triaged the inbox.", "Bob — I triaged the inbox.",
+    "Bob (default) – I triaged the inbox.", "Bob: I triaged the inbox.",
+])
+def test_a_dash_or_colon_label_is_still_stripped(text):
+    cast = standup.Cast("default", personas.BY_ID["bob"], "claim")
+    assert standup.tidy_segment(text, cast) == "Bob for default. I triaged the inbox."
+
+
+@pytest.mark.parametrize("title", [
+    "Password is required on signup", "Why the password was rejected",
+    "Password to the vault policy review", "Make the api key of the user optional",
+    "Explain passwords to the team", "set passcode to expire", "Token: counting bug in the parser",
+    "Secret: santa gift list planning",
+])
+def test_ordinary_titles_about_passwords_and_keys_survive(title):
+    assert standup.scrub_secrets(title) == title
+
+
+@pytest.mark.parametrize("text, secret", [
+    ("the wifi password is hunter2", "hunter2"),
+    ("password is 'opensesame'", "opensesame"),
+    ("passphrase is correcthorsebatterystaple", "correcthorsebatterystaple"),
+    ("Token: tok_live_4f9", "tok_live_4f9"),
+    ("api key: abc123", "abc123"),
+    ("password=hunter2", "hunter2"),
+    ('"password": "s3cr3t!"', "s3cr3t!"),
+])
+def test_secret_looking_values_are_still_redacted(text, secret):
+    assert secret not in standup.scrub_secrets(text)
+
+
+def test_redacted_titles_never_reach_the_model_and_redacted_text_is_never_spoken(root):
+    cast = standup.Cast("default", personas.BY_ID["bob"], "claim")
+    assert standup.tidy_segment("Bob here, I worked on the redacted job.", cast) is None
+    history = standup.History("default", titles=["Fix login", "Deploy staging with redacted"])
+    block = standup.source_text([history], {"default": cast})
+    assert "Fix login" in block and "redacted" not in block.lower()
+
+
+def test_a_minimal_sessions_table_is_read(tmp_path):
+    db = tmp_path / "hermes" / "state.db"
+    db.parent.mkdir(parents=True)
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE sessions (title TEXT, started_at REAL)")
+    conn.execute("INSERT INTO sessions VALUES ('Recent work', ?), ('Old work', ?)",
+                 (NOW - HOUR, NOW - 30 * HOUR))
+    conn.commit()
+    conn.close()
+    history = standup.read_history(tmp_path / "hermes", "default", NOW)
+    assert (history.status, history.titles) == ("ok", ["Recent work"])

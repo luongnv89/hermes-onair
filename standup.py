@@ -18,7 +18,13 @@ its own persona's voice; the segments are joined by DropCast's finish step
   the few-millisecond races where it still can). A ``profiles`` folder,
   profile folder or ``state.db`` that is a symbolic link, or a ``state.db``
   that resolves outside the profile's folder, is never opened, and such a
-  profile's claim is not read either (:func:`profile_dir`).
+  profile's claim is not read either (:func:`profile_dir`). A claim is read
+  only from its exact real path in the profile's own folder (no linked
+  ``plugin-data`` or ``onair``, the ``default`` root included).
+- Checks come before opens: the owner could swap a folder for a link in the
+  instant between the check and the open (SQLite follows folder links; only
+  the last part of a path is opened ``O_NOFOLLOW``). Only the machine's owner
+  can do that, to their own profiles.
 - Only the ``title`` (and a ``summary``, if the table has one) of sessions
   active in the last 24 hours is read: never a message, never a prompt.
 - Secret-looking strings (keys, tokens, passwords, private keys, long hex or
@@ -33,16 +39,16 @@ persona for this show only (:func:`personas.probe`), so every segment has a
 distinct voice and no other profile's files are written.
 
 **Script.** A plugin-written opening line ("This is the On Air standup for
-<day>: <N> agents report.") and closing line ("That's the standup. Back
-tomorrow."), spoken by the first profile's voice, frame the segments; they
-name no session content. One ``ctx.llm`` call (the ``onair_script`` task,
-reasoning off) writes 2 to 4 sentences per profile, with no speaker label;
-when it fails, the template says "<Profile> worked on: <titles>" (a title
-that held a secret is left out, so "redacted" is never spoken). A profile
-with no session in the window gets a one-line "quiet day" segment (it is
-never skipped, so the show accounts for every listed profile); one whose
-``state.db`` is missing or unreadable gets a one-line "could not be read"
-segment.
+<day>: <N> agents report.", the day being this machine's local date) and
+closing line ("That's the standup. Back tomorrow."), spoken by the first
+profile's voice, frame the segments; they name no session content. One
+``ctx.llm`` call (the ``onair_script`` task, reasoning off) writes 2 to 4
+sentences per profile, with no speaker label; when it fails, the template
+says "<Profile> worked on: <titles>" (a title that held a secret is left
+out, so "redacted" is never spoken). A profile with no session in the window
+gets a one-line "quiet day" segment (it is never skipped, so the show
+accounts for every listed profile); one whose ``state.db`` is missing or
+unreadable gets a one-line "could not be read" segment.
 
 **Voices.** One engine for the whole show (the router's chain: Fish, HeyGen,
 edge-tts for English); any failed segment drops that engine and the next one
@@ -155,15 +161,6 @@ _SECRET_PATTERNS = (
     # user:password@ in a URL.
     re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@\S*", re.IGNORECASE),
     re.compile(r"\bbearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE),
-    # key=value / key: value for secret-sounding keys.
-    re.compile(r"\b[\w-]*(?:api[_\s-]?key|apikey|secret[_\s-]?key|secret|token|passw(?:or)?d|passwd|pwd|"
-               r"access[_\s-]?key|private[_\s-]?key|credential)s?\b[\"']?\s*[:=]\s*[\"']?"
-               r"[^\s\"',;]+",
-               re.IGNORECASE),
-    # A password or key told in prose: "the wifi password is hunter2", "api key was abc".
-    re.compile(r"\b(?:passw(?:or)?d|passphrase|passcode|api[_\s-]?key|secret[_\s-]?key|"
-               r"access[_\s-]?key|private[_\s-]?key)s?\s+(?:is|was|are|were|to|of|"
-               r"set\s+to|changed\s+to)\s+[\"']?[^\s\"',;]+", re.IGNORECASE),
     re.compile(r"\b(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}"),  # sk-…, sk-or-…, sk-ant-…, sk-proj-…
     re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})"),
     re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}"),
@@ -178,11 +175,42 @@ _SECRET_PATTERNS = (
 )
 
 
+_SENSITIVE_NAMES = (r"api[_\s-]?key|apikey|secret[_\s-]?key|secret|token|passw(?:or)?d|passwd|pwd|"
+                r"passphrase|passcode|access[_\s-]?key|private[_\s-]?key|credential")
+#: A secret-sounding key and its value, redacted only when the value looks secret
+#: (:func:`_secret_value`): "password=hunter2", "api key: abc123", "the wifi password
+#: is hunter2", but not "Password is required on signup" or "Token: counting bug".
+_VALUE_PATTERNS = (
+    # key=value / key: value
+    re.compile(rf"\b[\w-]*(?:{_SENSITIVE_NAMES})s?\b[\"']?\s*[:=]\s*(?P<q>[\"']?)"
+               r"(?P<value>[^\s\"',;]+)", re.IGNORECASE),
+    # told in prose
+    re.compile(rf"\b(?:{_SENSITIVE_NAMES})s?\s+(?:is|was|are|were|to|of|set\s+to|changed\s+to)\s+"
+               r"(?P<q>[\"']?)(?P<value>[^\s\"',;]+)", re.IGNORECASE),
+)
+
+
+def _secret_value(match: re.Match[str]) -> str:
+    """``redacted`` when the value looks secret, else the text unchanged.
+
+    It looks secret when it is quoted, holds a digit or a symbol (sentence
+    punctuation at its end aside), or is 12 characters or more with no space.
+    A plain word ("required", "rejected", "the") is kept; so is a short
+    letters-only password ("opensesame"), an accepted miss.
+    """
+    value = match.group("value").rstrip(".!?:)")
+    if match.group("q") or len(value) >= 12 or re.search(r"[\d\W_]", value):
+        return REDACTED
+    return match.group(0)
+
+
 def scrub_secrets(text: str, key: str | None = None) -> str:
     """*text* with anything that looks like a secret replaced by ``redacted``."""
     text = openrouter.scrub(str(text), key).replace("[REDACTED]", REDACTED)
     for pattern in _SECRET_PATTERNS:
         text = pattern.sub(REDACTED, text)
+    for pattern in _VALUE_PATTERNS:
+        text = pattern.sub(_secret_value, text)
     return text
 
 
@@ -329,7 +357,7 @@ def read_history(root: Path, name: str, now: float, *,
         if "title" not in columns or "started_at" not in columns:
             return History(name, status="unreadable", reason="no sessions table it can read")
         when = [c for c in ("last_activity_at", "ended_at", "started_at") if c in columns]
-        active = f"COALESCE({', '.join(when)})"
+        active = when[0] if len(when) == 1 else f"COALESCE({', '.join(when)})"
         texts = ["title"] + (["summary"] if "summary" in columns else [])
         rows = conn.execute(
             f"SELECT {', '.join(texts)} FROM sessions "  # noqa: S608 - fixed column names
@@ -394,7 +422,9 @@ def _claimed(root: Path, name: str) -> personas.Persona | None:
     """The persona *name* claimed (its own claim file, read only), or None.
 
     None for a profile whose folder (or ``profiles`` folder) is a symbolic link
-    (:func:`profile_dir`): its claim is never read, so it speaks show-only.
+    (:func:`profile_dir`), or whose ``plugin-data`` or ``plugin-data/onair`` is
+    one, or whose claim resolves anywhere but its own folder: its claim is never
+    read, so it speaks show-only.
     """
     try:
         home = profile_dir(root, name)
@@ -402,8 +432,15 @@ def _claimed(root: Path, name: str) -> personas.Persona | None:
         return None
     path = personas.claim_path_of(home)
     try:
-        if not path.resolve().is_relative_to(home.resolve()):
-            return None  # a claim folder linked out of the profile: not its claim
+        # Every profile, the root (``default``) included: neither ``plugin-data`` nor
+        # ``onair`` may be a link, and the claim's real path must be exactly the one
+        # inside the profile's own folder (a root's link into ``profiles/<other>``
+        # would otherwise still be "inside" the root).
+        if path.parent.parent.is_symlink() or path.parent.is_symlink():
+            return None
+        expected = home.resolve() / "plugin-data" / "onair" / personas.CLAIM_FILE
+        if path.resolve() != expected:
+            return None
     except (OSError, RuntimeError):
         return None
     record = personas.read_record(path)
@@ -482,10 +519,16 @@ def instructions(language: str, people: list[Cast]) -> str:
     )
 
 
+def _clean_titles(h: History) -> list[str]:
+    """*h*'s titles without the ones that held a secret (they carry the token)."""
+    return [t for t in h.titles if REDACTED not in t.lower()]
+
+
 def source_text(histories: list[History], people: Mapping[str, Cast]) -> str:
+    """The titles for the model, fenced as data; a title that held a secret is left out."""
     blocks = []
     for h in histories:
-        lines = "\n".join(f"- {t}" for t in h.titles)
+        lines = "\n".join(f"- {t}" for t in _clean_titles(h))
         blocks.append(f"Profile {h.profile} ({people[h.profile].persona.name}):\n{lines}")
     return writer.source_block("\n\n".join(blocks))
 
@@ -498,7 +541,9 @@ def _label(c: Cast) -> re.Pattern[str]:
     """A leading speaker label: "Bob:", "Bob (default) -", "default —" and the like."""
     names = "|".join(re.escape(n) for n in (c.persona.name, c.profile, f"{c.persona.name} "
                                              f"for {c.profile}"))
-    return re.compile(rf"^\s*(?:{names})\s*(?:\([^)]*\))?\s*[:\-–—]\s*", re.IGNORECASE)
+    # A colon, or a dash with a space after it: "Bob-sled" and "Default-branch" stay.
+    return re.compile(rf"^\s*(?:{names})\s*(?:\([^)]*\))?\s*(?::|[-–—](?=\s))\s*",
+                      re.IGNORECASE)
 
 
 def tidy_segment(text: Any, c: Cast, key: str | None = None) -> str | None:
@@ -508,7 +553,7 @@ def tidy_segment(text: Any, c: Cast, key: str | None = None) -> str | None:
     line = writer._clean(scrub_secrets(text, key))
     line = _label(c).sub("", line, count=1).strip()
     kept = [s for s in writer.split_sentences(line) if s and writer.speakable(s)]
-    kept = [s for s in kept if REDACTED not in s.lower()] or kept
+    kept = [s for s in kept if REDACTED not in s.lower()]  # all redacted: the template
     out: list[str] = []
     for sentence in kept[:MAX_SENTENCES]:
         if out and writer.count_words(" ".join(out + [sentence])) > SEGMENT_WORDS:
@@ -533,7 +578,7 @@ def template_segment(h: History, c: Cast) -> str:
     so the template never says "redacted"; titles stop at the segment's
     word budget.
     """
-    clean = [t for t in h.titles if REDACTED not in t.lower()]
+    clean = _clean_titles(h)
     head = f"{_opening(c)} {c.profile.capitalize()} worked on"
     if not clean:
         count = len(h.titles)
@@ -579,13 +624,17 @@ def write_script(llm: Any, histories: list[History], people: list[Cast], languag
     busy = [h for h in histories if h.status == "ok"]
     texts: dict[str, str] = {}
     source, model, error = ("none", None, None)
+    # A profile whose every title held a secret is not sent: the template speaks for it.
+    askable = [h for h in busy if _clean_titles(h)]
     if busy:
-        written, model, error = _ask(llm, busy, by_name, language, task=task, sleep=sleep,
-                                     key=key)
+        written: dict[str, str] = {}
+        if askable:
+            written, model, error = _ask(llm, askable, by_name, language, task=task,
+                                         sleep=sleep, key=key)
         source = "llm" if written else "template"
         for h in busy:
             texts[h.profile] = written.get(h.profile) or template_segment(h, by_name[h.profile])
-        if written and len(written) < len(busy):
+        if written and len(written) < len(askable):
             error = "the model skipped a profile; the template speaks for it"
     ordered = {}
     for h in histories:
