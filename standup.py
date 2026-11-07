@@ -662,6 +662,10 @@ def make_standup(
     if sidecar.ownership(venv) not in (sidecar.OWNED, sidecar.ADOPTABLE):
         raise StandupError("the sidecar is not set up: run `hermes onair setup` first")
     key = openrouter.api_key(tools.environ)
+    if scheduled and key is None:  # nothing could voice it: read nothing, call no model
+        raise StandupError("a scheduled standup uses free OpenRouter voices only (never "
+                           "edge-tts, which is for a requesting user's private listening), "
+                           "and there is no OPENROUTER_API_KEY in the environment")
     when = time.time() if now is None else now
     histories = [read_history(root, n, when, connect=connect, key=key) for n in names]
     people = cast(root, names)

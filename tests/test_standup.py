@@ -497,11 +497,19 @@ def test_with_a_key_one_free_openrouter_engine_voices_the_whole_show(root):
     assert sidecar.finishes[0]["engine"] == "openrouter"
 
 
-def test_a_scheduled_standup_never_uses_edge_tts(root):
-    sidecar = Sidecar()
-    with pytest.raises(standup.StandupError, match="no free voice engine") as caught:
-        run(host_for(root, sidecar), scheduled=True)
-    assert sidecar.edge == [] and "private listening" in str(caught.value)
+def test_a_scheduled_standup_never_uses_edge_tts(root, monkeypatch):
+    opened = Opened(monkeypatch)
+    sidecar, llm = Sidecar(), FakeLlm()
+    with pytest.raises(standup.StandupError, match="free OpenRouter voices only") as caught:
+        run(host_for(root, sidecar, llm=llm), scheduled=True)
+    assert sidecar.runner.calls == [] and "private listening" in str(caught.value)
+    assert opened.uris == [] and llm.calls == []  # nothing read, no model call
+    # With a key, a failing OpenRouter engine still never falls back to edge-tts.
+    http = FakeHttp(speech={})
+    with pytest.raises(standup.StandupError, match="edge: edge-tts is for a requesting"):
+        run(host_for(root, sidecar, http=http, environ={"OPENROUTER_API_KEY": KEY}),
+            scheduled=True)
+    assert sidecar.edge == []
 
 
 def test_a_cron_run_is_detected_as_scheduled(root, monkeypatch):
@@ -560,7 +568,7 @@ def test_the_tool_returns_the_reply_or_the_refusal(root):
     assert refused == {"ok": False, "error": "not opted in: secret. Only profiles listed in "
                                              "standup_profiles are read"}
     scheduled = json.loads(handle({"scheduled": True}))
-    assert not scheduled["ok"] and "private listening" in scheduled["error"]
+    assert not scheduled["ok"] and "free OpenRouter voices only" in scheduled["error"]
 
 
 def test_opt_in_names_are_profile_names_only():
