@@ -884,6 +884,32 @@ def script_document(draft: Any, brief: Brief, source: Source,
     return document
 
 
+#: The format a standup's ``script.json`` names. DropCast has no spec for it, so
+#: the finish step treats it as a show (the show's theme, no story mood cues).
+STANDUP_FORMAT = "onair-standup"
+
+
+def segments_document(title: str, language: str, speakers: Mapping[str, str],
+                      lines: list[tuple[str, str, str]]) -> dict[str, Any]:
+    """A ``script.json`` for the finish step from ``(segment id, speaker id, text)`` lines.
+
+    *speakers* maps speaker id -> display name (the transcript's voice tags).
+    Only the finish step reads it (the theme, the transcript), never ``run``.
+    """
+    words = sum(len(text.split()) for _sid, _speaker, text in lines)
+    minutes = max(round(words / 150, 2), 0.01)
+    return {
+        "title": title,
+        "format": STANDUP_FORMAT,
+        "language": language if _LANG_TAG.fullmatch(language or "") else "en",
+        "target_min": minutes,
+        "est_min": minutes,
+        "speakers": [{"id": sid, "name": name} for sid, name in speakers.items()],
+        "segments": [{"id": sid, "speaker": speaker, "text": text, "cues": []}
+                     for sid, speaker, text in lines],
+    }
+
+
 def write_script(job: str | Path, document: Mapping[str, Any], summary: list[str]) -> None:
     """Write ``script.json`` and ``summary.txt`` (three short lines) into the job."""
     job = Path(job)
@@ -1032,11 +1058,12 @@ job = Path(spec["job"])
 script = json.loads((job / "script.json").read_text(encoding="utf-8"))
 parts = [finish.Part(Path(p["path"]), (finish.Piece(p["segment"], p["text"]),))
          for p in spec["parts"]]
-run = {"engine": "openrouter", "model": spec["model"], "voices": spec["voices"],
+run = {"engine": spec.get("engine", "openrouter"), "model": spec["model"],
+       "voices": spec["voices"],
        "chunks": [{"id": p["segment"], "chars": len(p["text"]), "status": "done"}
                   for p in spec["parts"]],
        "credits_estimated": None, "credits_used": None, "cost_estimated_usd": 0.0,
-       "private_use": False, "cues_dropped": 0, "duration_s": None,
+       "private_use": bool(spec.get("private_use")), "cues_dropped": 0, "duration_s": None,
        "started": spec["started"], "finished": None, "errors": []}
 try:
     done = finish.finish_episode(parts, job, script=script, fmt="mp3", run=run,
@@ -1065,17 +1092,21 @@ def finish_parts(
     model: str,
     voices: Mapping[str, str],
     started: str,
+    engine: str = "openrouter",
+    private_use: bool = False,
     runner: Runner = subprocess.run,
     env: Mapping[str, str] | None = None,
 ) -> Finished:
     """Join rendered *parts* ``(mp3 path, segment id, text)`` with DropCast's finish step.
 
-    Writes ``episode.mp3``, ``transcript.vtt`` and ``run.json`` into *job*.
+    Writes ``episode.mp3``, ``transcript.vtt`` and ``run.json`` into *job*;
+    ``run.json`` records *engine* and *private_use* (True for edge-tts parts).
     """
     job = Path(job)
     spec = job / "onair-finish.json"
     record = {
         "job": str(job), "model": model, "voices": dict(voices), "started": started,
+        "engine": engine, "private_use": bool(private_use),
         "parts": [{"path": str(p), "segment": s, "text": t} for p, s, t in parts],
     }
     try:

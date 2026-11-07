@@ -184,31 +184,44 @@ def _now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def _render_openrouter(
+def render_turns(
     engine: str,
     lines: list[tuple[str, str, str]],
-    voices: dict[str, str],
+    voices: Mapping[str, str],
     env: router.Environment,
     job: Path,
     venv: Path,
     tools: Tools,
+    language: str = "en",
 ) -> adapter.Finished:
-    """Every turn with *engine*, then the finish step. Raises EngineError on any failure."""
+    """Every line ``(segment id, speaker id, text)`` with *engine*, then the finish step.
+
+    *voices* maps speaker id -> that engine's voice. Fish and HeyGen go through
+    the router (the price gate runs before every call, rule 1); edge-tts is
+    rendered by the sidecar, one line at a time (private use only, rule 3).
+    Raises :class:`router.EngineError` on any failure.
+    """
     parts_dir = job / "audio" / "onair" / engine
     parts_dir.mkdir(parents=True, exist_ok=True)
     started = _now_iso()
     parts: list[tuple[Path, str, str]] = []
-    render = router.render_fish if engine == router.FISH else router.render_heygen
     for sid, speaker, text in lines:
         with tempfile.TemporaryDirectory(prefix="onair-turn-") as tmp:
-            made = render(env, text, voices[speaker], Path(tmp), "mp3")
+            if engine == router.FISH:
+                made = router.render_fish(env, text, voices[speaker], Path(tmp), "mp3")
+            elif engine == router.HEYGEN:
+                made = router.render_heygen(env, text, voices[speaker], Path(tmp), "mp3")
+            else:
+                made = router.render_edge(env, text, voices[speaker], language, Path(tmp), "mp3")
             target = parts_dir / f"{sid}.mp3"
             shutil.copyfile(made, target)
         parts.append((target, sid, text))
+    edge = engine == router.EDGE
     try:
         return adapter.finish_parts(
-            venv, job, parts, model=router.MODELS[engine], voices=voices, started=started,
-            runner=tools.runner, env=tools.environ,
+            venv, job, parts, model="edge-tts" if edge else router.MODELS[engine],
+            voices=voices, started=started, engine="edgetts" if edge else "openrouter",
+            private_use=edge, runner=tools.runner, env=tools.environ,
         )
     except adapter.AdapterError as exc:
         raise router.EngineError(str(exc)) from None
@@ -377,7 +390,7 @@ def make_episode(
             elif key is None:
                 raise router.EngineError("no OPENROUTER_API_KEY in the environment")
             else:
-                finished = _render_openrouter(engine, lines, voices, env, job, venv, tools)
+                finished = render_turns(engine, lines, voices, env, job, venv, tools, language)
         except (router.EngineError, adapter.AdapterError, OSError) as exc:
             reason = openrouter.scrub(str(exc), key)
             skipped.append({"engine": engine, "reason": reason[:300]})
