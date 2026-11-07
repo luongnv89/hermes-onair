@@ -44,7 +44,7 @@ def test_config_schema_matches_the_code():
     schema = MANIFEST["config_schema"]
     assert set(schema) == {
         "uv_bin", "sidecar_python", "ffmpeg_bin", "language", "voices", "episode_minutes",
-        "keep_episodes",
+        "keep_episodes", "standup_profiles",
     }
     assert schema["uv_bin"]["default"] == sidecar.DEFAULT_UV_BIN
     assert schema["sidecar_python"]["default"] == sidecar.DEFAULT_SIDECAR_PYTHON
@@ -53,7 +53,9 @@ def test_config_schema_matches_the_code():
     assert schema["voices"] == {**schema["voices"], "type": "dict", "default": {}}
     assert schema["episode_minutes"]["default"] == episode.DEFAULT_MINUTES
     assert schema["keep_episodes"]["default"] == episode.KEEP_EPISODES
-    names = ("cli.py", "router.py", "episode.py")
+    assert schema["standup_profiles"] == {**schema["standup_profiles"], "type": "list",
+                                          "default": []}
+    names = ("cli.py", "router.py", "episode.py", "standup.py")
     source = "".join((ROOT / name).read_text(encoding="utf-8") for name in names)
     for key in schema:
         assert f'"{key}"' in source, f"{key} is declared but never read"
@@ -62,7 +64,7 @@ def test_config_schema_matches_the_code():
 def test_provides_match_what_register_registers():
     ctx = StrictContext()
     onair.register(ctx)
-    assert MANIFEST.get("provides_tools", []) == ctx.tools == ["onair_episode"]
+    assert MANIFEST.get("provides_tools", []) == ctx.tools == ["onair_episode", "onair_standup"]
     assert MANIFEST.get("provides_hooks", []) == ctx.hooks == []
     assert [c["name"] for c in ctx.cli_commands] == ["onair"]
     # Hermes has no provides_* key for slash commands either; the description names it.

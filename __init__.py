@@ -6,7 +6,10 @@ free voice router (:mod:`router`) in the active profile's persona
 (:mod:`personas`); ``/onair voice`` shows and changes it (:mod:`commands`).
 ``/onair <link|text>`` and the ``onair_episode`` agent tool (:mod:`tool`)
 share one pipeline (:mod:`episode`) that turns a link or text into a
-two-host episode.
+two-host episode. ``/onair standup [profiles…]`` and the ``onair_standup``
+tool record the Agent Standup show (:mod:`standup`): each opted-in profile
+reports its day in its own voice. A morning-standup Automation Blueprint is
+registered where Hermes offers ``ctx.register_automation_blueprint``.
 """
 
 from __future__ import annotations
@@ -58,6 +61,57 @@ def register(ctx) -> None:
         description=tool.DESCRIPTION,
         emoji=tool.EMOJI,
     )
+    ctx.register_tool(
+        name=tool.STANDUP_NAME,
+        toolset=tool.TOOLSET,
+        schema=tool.STANDUP_SCHEMA,
+        handler=tool.make_standup_handler(host),
+        description=tool.STANDUP_DESCRIPTION,
+        emoji=tool.EMOJI,
+    )
+    _register_blueprint(ctx)
+
+
+#: The morning standup blueprint (``/blueprint``, the dashboard gallery). Its run
+#: has no requesting user, so the tool is told so (``scheduled``) and also
+#: detects the cron run itself: only free OpenRouter voices, never edge-tts.
+BLUEPRINT_KEY = "standup"
+BLUEPRINT = {
+    "title": "On Air morning standup",
+    "description": (
+        "Every weekday morning, your opted-in agents (the onair standup_profiles setting) "
+        "each report their last 24 hours in their own voice, as one short audio show. "
+        "Scheduled runs use only free OpenRouter voices (OPENROUTER_API_KEY), never "
+        "edge-tts; without the key the run reports why and sends no audio."
+    ),
+    "category": "daily",
+    "schedule_template": "{minute} {hour} * * 1-5",
+    "prompt_template": (
+        "Call the onair_standup tool with scheduled set to true and no profiles. If it "
+        "returns ok true, reply with exactly its 'reply' text, which ends with a MEDIA: "
+        "line; add nothing. If it returns ok false, reply with one sentence giving its "
+        "error. Do not call any other tool."
+    ),
+    "slots": [
+        {"name": "time", "type": "time", "label": "What time?", "default": "09:00",
+         "help": "24h local time, e.g. 09:00"},
+        {"name": "deliver", "type": "enum", "label": "Where to deliver?", "default": "origin",
+         "options": ["origin", "local", "telegram", "discord"], "strict": False},
+    ],
+    "deliver_default": "origin",
+    "tags": ["daily", "standup", "audio"],
+}
+
+
+def _register_blueprint(ctx) -> bool:
+    """Register the morning standup blueprint; False on a Hermes without the API."""
+    register = getattr(ctx, "register_automation_blueprint", None)
+    if not callable(register):
+        return False
+    try:
+        return register(BLUEPRINT_KEY, **BLUEPRINT) is not None
+    except Exception:  # a refused blueprint must not stop the plugin from loading
+        return False
 
 
 def _register_script_task(ctx, writer) -> str | None:

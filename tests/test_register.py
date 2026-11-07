@@ -80,7 +80,7 @@ def test_register_adds_the_cli_command_the_slash_command_the_tool_and_the_tts_pr
     (slash,) = ctx.commands
     assert slash["name"] == "onair" and callable(slash["handler"])
     assert slash["args_hint"] == commands.ARGS_HINT and "voice" in slash["description"]
-    assert ctx.tools == ["onair_episode"] and ctx.hooks == []
+    assert ctx.tools == ["onair_episode", "onair_standup"] and ctx.hooks == []
     assert callable(ctx.cli_commands[0]["handler_fn"])
     (provider,) = ctx.tts_providers
     assert isinstance(provider, router.OnAirTTS) and provider.name == "onair"
@@ -123,7 +123,7 @@ def test_register_touches_nothing_else():
     ctx = Bare()
     onair.register(ctx)  # any other attribute access would raise AttributeError
     assert ctx.n == 1 and len(ctx.providers) == 1 and ctx.slash == ["onair"]
-    assert ctx.tools == ["onair_episode"]
+    assert ctx.tools == ["onair_episode", "onair_standup"]
 
 
 def test_the_provider_reads_settings_through_the_context(tmp_path, monkeypatch):
@@ -253,7 +253,8 @@ def test_register_adds_the_reasoning_off_script_task():
 def test_register_still_loads_without_the_task(ctx_factory):
     ctx = ctx_factory()
     onair.register(ctx)
-    assert ctx.tools == ["onair_episode"] and [c["name"] for c in ctx.commands] == ["onair"]
+    assert ctx.tools == ["onair_episode", "onair_standup"]
+    assert [c["name"] for c in ctx.commands] == ["onair"]
 
 
 def test_the_host_binding_carries_the_task_only_when_registered(monkeypatch):

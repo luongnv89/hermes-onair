@@ -17,7 +17,8 @@ CODE_AND_CONFIG = {".py", ".yaml", ".yml", ".toml", ".txt", ".cfg", ".ini", ".js
 HOST_MODULES = sorted(p for p in ROOT.glob("*.py"))
 # The only non-stdlib imports the host side may make: Hermes's public storage
 # helper and the TTS provider base class.
-HERMES_IMPORTS = {"cli.py": {"plugins.plugin_storage"}, "router.py": {"agent.tts_provider"}}
+HERMES_IMPORTS = {"cli.py": {"plugins.plugin_storage"}, "router.py": {"agent.tts_provider"},
+                  "standup.py": {"gateway.session_context"}}
 
 
 def repo_files():

@@ -13,7 +13,15 @@ description: >-
   choice), via the plugin's auxiliary task `onair_script` (reasoning off by
   default; no provider or model override; `auxiliary.onair_script` in
   config.yaml overrides it), or by a built-in template when that fails.
-  `hermes onair setup`
+  `/onair standup [profiles]` and the `onair_standup` tool record the Agent
+  Standup: each profile listed in the `standup_profiles` setting reports its
+  last 24 hours in its own voice. Privacy: only listed profiles are read
+  (any other is refused); each one's own state.db is opened read-only, and
+  only the titles (and summaries) of sessions from the last 24 hours are
+  read, never messages; secret-looking strings are removed before the
+  titles reach your model (ctx.llm), the voices or any file. A morning
+  standup Automation Blueprint uses free OpenRouter voices only, never
+  edge-tts. `hermes onair setup`
   installs the pinned DropCast sidecar that ingests, checks and finishes
   episodes and renders edge-tts.
 author: Luong NGUYEN
@@ -28,13 +36,15 @@ tags: [tts, voice, podcast]
 python_runtime: external
 # register() registers the `hermes onair` CLI command, the `/onair` slash
 # command (ctx.register_command), the `onair` TTS provider
-# (ctx.register_tts_provider) and the `onair_episode` agent tool
-# (ctx.register_tool). It also registers the auxiliary LLM task
-# `onair_script` (ctx.register_auxiliary_task; defaults: reasoning_effort
+# (ctx.register_tts_provider), the `onair_episode` and `onair_standup` agent
+# tools (ctx.register_tool) and, where Hermes has
+# ctx.register_automation_blueprint, the `onair:standup` blueprint. It also
+# registers the auxiliary LLM task `onair_script` (ctx.register_auxiliary_task; defaults: reasoning_effort
 # none, no provider or model). Hermes has no provides_* key for the CLI
 # command, the slash command, the TTS provider or auxiliary tasks.
 provides_tools:
   - onair_episode
+  - onair_standup
 provides_hooks: []
 config_schema:
   uv_bin:
@@ -82,3 +92,12 @@ config_schema:
     description: >-
       How many episode folders to keep under the plugin data dir; older ones
       are removed after each new episode. 0 keeps every episode.
+  standup_profiles:
+    type: list
+    default: []
+    description: >-
+      Profiles the Agent Standup may read (`default` is the root profile),
+      e.g. [default, coder, research]. Nothing is read for a profile that is
+      not listed: `/onair standup <name>` refuses it. Each listed profile's
+      own state.db is opened read-only for the titles of its sessions from
+      the last 24 hours.
