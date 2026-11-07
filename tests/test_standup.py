@@ -233,10 +233,67 @@ def test_each_state_db_is_opened_read_only(root, monkeypatch):
     db = root / "profiles" / "coder" / "state.db"
     before = (db.read_bytes(), db.stat().st_mtime_ns)
     run(host_for(root, Sidecar()))
+    assert len(opened.uris) == 3
     for uri, kwargs in opened.uris:
-        assert uri.startswith("file:") and uri.endswith("?mode=ro") and kwargs["uri"] is True
+        query = uri.partition("?")[2].split("&")
+        assert uri.startswith("file:") and "mode=ro" in query and kwargs["uri"] is True
+        assert not any(q.startswith("immutable") for q in query)  # rollback-journal fixtures
     assert (db.read_bytes(), db.stat().st_mtime_ns) == before
     assert not (db.parent / "state.db-journal").exists()
+
+
+def seed_wal(db: Path, sessions: list[tuple[str, float, float | None]]) -> None:
+    """:func:`seed`, as a WAL database (Hermes's mode), closed so no side file is left."""
+    db.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db)
+    assert conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+    conn.close()
+    seed(db, sessions)
+
+
+def files_under(folder: Path) -> set[Path]:
+    return set(folder.rglob("*"))
+
+
+def test_an_idle_wal_state_db_is_opened_immutable_and_gets_no_side_files(root, monkeypatch):
+    home = root / "profiles" / "research"
+    db = home / "state.db"
+    db.unlink()
+    seed_wal(db, [("Chart the spring tides", NOW - 3 * HOUR, NOW - 2 * HOUR)])
+    assert db.read_bytes()[18:20] == b"\x02\x02"
+    assert not Path(f"{db}-wal").exists() and not Path(f"{db}-shm").exists()
+    files, data = files_under(home), db.read_bytes()
+    opened = Opened(monkeypatch)
+    history = standup.read_history(root, "research", NOW)
+    assert history.status == "ok" and history.titles == ["Chart the spring tides"]
+    ((uri, _),) = opened.uris
+    assert uri.endswith("?mode=ro&immutable=1")
+    assert files_under(home) == files and db.read_bytes() == data
+
+
+def test_a_wal_state_db_a_writer_holds_open_is_read_plain_read_only(root, monkeypatch):
+    home = root / "profiles" / "research"
+    db = home / "state.db"
+    db.unlink()
+    seed_wal(db, [("Chart the spring tides", NOW - 3 * HOUR, NOW - 2 * HOUR)])
+    writer_conn = sqlite3.connect(db)
+    try:
+        writer_conn.execute("PRAGMA wal_autocheckpoint = 0")  # keep the new row in the WAL
+        writer_conn.execute("INSERT INTO sessions (id, source, started_at, title, "
+                            "last_activity_at) VALUES ('w', 'cli', ?, ?, ?)",
+                            (NOW - HOUR, "Committed while the writer is open", NOW - HOUR))
+        writer_conn.commit()
+        assert Path(f"{db}-wal").exists() and Path(f"{db}-shm").exists()
+        files = files_under(home)
+        opened = Opened(monkeypatch)
+        history = standup.read_history(root, "research", NOW)
+        ((uri, _),) = opened.uris
+        assert uri.endswith("?mode=ro") and "immutable" not in uri
+        assert history.titles == ["Committed while the writer is open",
+                                  "Chart the spring tides"]
+        assert files_under(home) == files
+    finally:
+        writer_conn.close()
 
 
 def test_a_read_only_connection_cannot_write(root):
@@ -599,9 +656,12 @@ def test_the_blueprint_is_registered_when_hermes_offers_the_api():
 
 
 def test_the_standup_module_never_writes_a_sibling_profile(root):
-    before = {p: p.stat().st_mtime_ns for p in root.rglob("*") if p.is_file()
-              and "plugin-data" not in p.parts}
+    def snapshot():
+        paths = {p for p in root.rglob("*") if "plugin-data" not in p.parts}
+        return paths, {p: p.stat().st_mtime_ns for p in paths if p.is_file()}
+
+    paths, mtimes = snapshot()
     run(host_for(root, Sidecar()))
-    after = {p: p.stat().st_mtime_ns for p in root.rglob("*") if p.is_file()
-             and "plugin-data" not in p.parts}
-    assert after == before
+    paths_after, mtimes_after = snapshot()
+    assert paths_after == paths  # no new file or folder, none removed
+    assert mtimes_after == mtimes

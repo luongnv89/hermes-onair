@@ -269,8 +269,9 @@ joins the segments with the show's theme and loudness. The reply follows
   anything is opened; so is every profile when the list is empty.
 - **Read-only.** A profile's history is its own `state.db`
   (`$HERMES_ROOT/state.db` for `default`, `$HERMES_ROOT/profiles/<name>/state.db`
-  otherwise), opened with SQLite's `mode=ro` URI and `PRAGMA query_only`: it is
-  never written or write-locked. A `state.db`, a profile folder or a
+  otherwise), opened with SQLite's `mode=ro` URI (plus `immutable=1` for an
+  idle WAL database, so SQLite creates no side files there) and
+  `PRAGMA query_only`: it is never written, write-locked, or given new files. A `state.db`, a profile folder or a
   `profiles` folder that is a symbolic link is never followed.
 - **Titles only.** Only the titles (and a summary, where the table has one)
   of sessions active in the last 24 hours are read: never a message, a

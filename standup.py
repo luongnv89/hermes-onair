@@ -11,7 +11,9 @@ its own persona's voice; the segments are joined by DropCast's finish step
   opened, and no other profile's files are touched.
 - A profile's history is its own ``state.db`` (``<root>/state.db`` for
   ``default``, ``<root>/profiles/<name>/state.db`` otherwise), opened
-  **read-only** (``sqlite3`` URI ``mode=ro``, ``PRAGMA query_only``). A
+  **read-only** (``sqlite3`` URI ``mode=ro``, plus ``immutable=1`` for an
+  idle WAL database so SQLite creates no side files there; ``PRAGMA
+  query_only``): never written, write-locked, or given new files. A
   profile folder or ``state.db`` that is a symbolic link, or that resolves
   outside the profile's folder, is never opened.
 - Only the ``title`` (and a ``summary``, if the table has one) of sessions
@@ -216,14 +218,39 @@ def state_db(root: Path, name: str) -> Path | None:
     return real
 
 
+_SQLITE_MAGIC = b"SQLite format 3\x00"
+
+
+def idle_wal(db: Path) -> bool:
+    """True when *db* is a WAL database that no writer has open.
+
+    That is: its header says WAL (bytes 18 and 19 both 2) and neither
+    ``<db>-wal`` nor ``<db>-shm`` exists. Any error reading it: False.
+    """
+    try:
+        if Path(f"{db}-wal").exists() or Path(f"{db}-shm").exists():
+            return False
+        with open(db, "rb") as fh:
+            head = fh.read(20)
+    except OSError:
+        return False
+    return len(head) == 20 and head[:16] == _SQLITE_MAGIC and head[18] == 2 and head[19] == 2
+
+
 def connect_ro(db: Path, connect: Callable[..., sqlite3.Connection] | None = None
                ) -> sqlite3.Connection:
     """A read-only connection to *db*: URI ``mode=ro``, then ``query_only``.
 
-    ``mode=ro`` never creates, writes or takes a write lock on the database
-    (a WAL database's ``-shm`` index is SQLite's shared memory, not the data).
+    ``mode=ro`` never writes or write-locks the database. An idle WAL
+    database (no ``-wal``/``-shm`` beside it) also gets ``immutable=1``:
+    otherwise SQLite would create those two side files in the profile's
+    folder and leave them there. When they already exist (a writer has the
+    database open), plain ``mode=ro`` creates nothing new and still sees the
+    rows committed to the WAL. No file is ever deleted.
     """
     uri = f"file:{urllib.parse.quote(str(db))}?mode=ro"
+    if idle_wal(db):
+        uri += "&immutable=1"
     opener = connect or sqlite3.connect  # looked up per call: a test may patch it
     conn = opener(uri, uri=True, timeout=CONNECT_TIMEOUT_S, isolation_level=None)
     try:
