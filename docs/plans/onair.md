@@ -39,7 +39,7 @@ Depends on: Task 1.1
 - `OnAirTTS(TTSProvider)` with an engine chain per language:
   - EN: Fish free → HeyGen free → edge-tts;
   - other languages: HeyGen free → Fish free → edge-tts.
-- Price gate: read the public OpenRouter model list (cached 24 h). Call a model only when its id ends in `:free` or every price is zero. Never call a paid model. With no list and no cache, skip OpenRouter.
+- Price gate: call an OpenRouter model only if it appears in the public model list (a copy up to 24 h old is fine) and either its id ends in `:free` or every listed price is zero. A non-zero listed price means paid, whatever the id. If there is no list and no cache, or the check fails, skip OpenRouter.
 - Fall through to the next engine on 401, 402, 408, 429, 5xx, network errors, a missing key, or a failed price check. Never mix engines within one request.
 - Convert HeyGen PCM to WAV/MP3 with ffmpeg. Write to the path Hermes gives (a temp path that gets renamed): no sidecar files keyed by that path.
 - The key comes only from the `OPENROUTER_API_KEY` env var. Never log, print or store it.
@@ -52,7 +52,7 @@ Depends on: Task 1.2
 - Each profile gets a stable persona (a voice id per engine and language) from a pool. It is claimed on first use and stored in that profile's plugin data, so up to the pool size no two profiles share one (a plain hash collided on 3 of 8 real profile names).
 - Resolve the profile per call (`ctx.profile_name`, falling back to the home directory name).
 - `/onair voice` shows the profile's voice, `/onair voice list` lists the pool, and `/onair voice set <id>` changes it.
-- Acceptance: on Luong's 8 profile names the personas are distinct and stable across restarts (tested).
+- Acceptance: on Luong's 9 profile names the personas are distinct and stable across restarts (tested).
 
 ## Phase 2: shows
 
@@ -89,7 +89,10 @@ Depends on: Task 2.1
 
 ### Task 3.1: Docs, catalog entry draft and demo script
 Depends on: Task 2.1
-- README: install, setup and config; a "Free means" section (the free OpenRouter models are promotions that may end; edge-tts is unofficial and its output is for private use only: delivering it to the requesting user's own chat or session is fine, but never publish it (no public post, plugin catalog entry, demo, or release asset); engines and fallback); disclosure; privacy.
+- README: install, setup and config; disclosure; privacy; and a "Free means" section covering:
+  - the free OpenRouter models are promotions that may end;
+  - edge-tts is unofficial, and its output is for private use only. Delivering it to the requesting user's own chat or session is fine. Never publish it: no public post, plugin catalog entry, demo, or release asset;
+  - the engines and the fallback order.
 - A catalog card image, and a draft `plugin-catalog/onair.yaml` matching `~/.hermes/hermes-agent/plugin-catalog/` entries (name, repo, sha, description with disclosure, category voice, capabilities). Do NOT open the catalog PR.
 - `docs/demo.md`: a 90 s demo script with shots: link → episode on Telegram; Agent Standup; Desktop player if done.
 - Acceptance: a fresh install from the README works in an isolated `HERMES_HOME`.
