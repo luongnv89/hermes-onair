@@ -45,8 +45,10 @@ Voice subcommands (``/voice`` is a Hermes built-in, so they live under ``/onair`
 ``/onair standup [profiles…]`` records the Agent Standup show (:mod:`standup`):
 each opted-in profile (the ``standup_profiles`` setting) reports its last 24 h
 in its own voice. A profile that is not listed is refused before anything is
-read. ``standup`` followed by profile names only is the command; ``standup``
-followed by anything else is a text to record.
+read. ``standup`` alone is the command; so is ``standup`` followed by words
+that each name a listed profile or an existing profile folder (an unlisted
+one is then refused). Anything else after ``standup`` ("standup is great")
+is a text to record as an episode, as before this command existed.
 
 The profile and its home are resolved on every call, as for speech.
 """
@@ -190,13 +192,18 @@ def _is_voice_command(args: list[str]) -> bool:
     return False
 
 
-def _is_standup_command(args: list[str]) -> bool:
-    """``standup`` alone, or followed by profile names only (at most 10)."""
+def _is_standup_command(args: list[str], host: episode.Host | None = None) -> bool:
+    """``standup`` alone, or followed by words that all name profiles.
+
+    A word names a profile when it is listed in ``standup_profiles`` or names
+    an existing profile folder (:func:`standup.names_profiles`, a ``stat``
+    only). Otherwise the words are an episode text.
+    """
     if not args or args[0].lower() != "standup":
         return False
-    rest = args[1:]
-    return len(rest) <= standup.MAX_PROFILES and all(
-        standup._NAME.fullmatch(a.lower()) for a in rest)
+    if len(args) == 1:
+        return True
+    return host is not None and standup.names_profiles(host, args[1:])
 
 
 class _Announcer:
@@ -293,7 +300,7 @@ def make_handler(
         args = (raw_args or "").split()
         if not args:
             return USAGE
-        if _is_standup_command(args) and host is not None:
+        if host is not None and _is_standup_command(args, host):
             return standup_reply(host, args[1:], post)
         if not _is_voice_command(args):
             if host is None:

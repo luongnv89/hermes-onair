@@ -14,6 +14,7 @@ import json
 import os
 import sqlite3
 import types
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -137,6 +138,19 @@ def run(host, names=(), **kw):
     return standup.run(host, list(names), now=NOW, **kw)
 
 
+def spoken_of(made):
+    """Every spoken line of the show, opening and closing included."""
+    return [s["text"] for s in json.loads((made.job / "script.json").read_text())["segments"]]
+
+
+def segments_of(made):
+    """The profiles' segments, without the plugin's opening and closing lines."""
+    lines = spoken_of(made)
+    assert lines[0].startswith("This is the On Air standup for ")
+    assert lines[-1] == standup.CLOSING_LINE
+    return lines[1:-1]
+
+
 class Opened:
     """Every path opened through sqlite3.connect, os.open, open and io.open."""
 
@@ -183,9 +197,10 @@ def test_a_three_profile_standup_renders_with_three_distinct_voices(root):
     assert len(set(voices)) == 3
     assert made.engine == router.EDGE and made.private_use
     # Each segment was spoken in its own voice, and the finish step joined all three.
-    assert [e["voice"] for e in sidecar.edge] == voices
+    # The opening and closing lines are spoken by the first voice: no new voice.
+    assert [e["voice"] for e in sidecar.edge] == [voices[0], *voices, voices[0]]
     (spec,) = sidecar.finishes
-    assert len(spec["parts"]) == 3 and spec["engine"] == "edgetts" and spec["private_use"]
+    assert len(spec["parts"]) == 5 and spec["engine"] == "edgetts" and spec["private_use"]
     assert set(spec["voices"].values()) == set(voices)
     # Claimed personas speak for their profiles; research had none: a show-only one.
     cast = {s["profile"]: (s["persona"], s["how"]) for s in made.segments}
@@ -296,6 +311,37 @@ def test_a_wal_state_db_a_writer_holds_open_is_read_plain_read_only(root, monkey
         writer_conn.close()
 
 
+def wal_with_one_side_file(db: Path, keep: str) -> None:
+    """A WAL db whose writer left only ``-wal`` or only ``-shm`` (a crash, or persistent WAL)."""
+    seed_wal(db, [("Chart the spring tides", NOW - 3 * HOUR, NOW - 2 * HOUR)])
+    writer_conn = sqlite3.connect(db)
+    writer_conn.execute("PRAGMA wal_autocheckpoint = 0")
+    writer_conn.execute("INSERT INTO sessions (id, source, started_at, title, last_activity_at) "
+                        "VALUES ('w', 'cli', ?, ?, ?)", (NOW - HOUR, "Only in the WAL", NOW - HOUR))
+    writer_conn.commit()
+    saved = Path(f"{db}-{keep}").read_bytes()
+    writer_conn.close()  # checkpoints and removes both side files
+    Path(f"{db}-{keep}").write_bytes(saved)
+
+
+@pytest.mark.parametrize("keep", ["wal", "shm"])
+def test_a_wal_state_db_with_one_side_file_is_read_immutable_and_gets_no_new_file(
+        root, monkeypatch, keep):
+    home = root / "profiles" / "research"
+    db = home / "state.db"
+    db.unlink()
+    wal_with_one_side_file(db, keep)
+    other = "shm" if keep == "wal" else "wal"
+    assert Path(f"{db}-{keep}").exists() and not Path(f"{db}-{other}").exists()
+    files, data = files_under(home), db.read_bytes()
+    opened = Opened(monkeypatch)
+    history = standup.read_history(root, "research", NOW)
+    ((uri, _),) = opened.uris
+    assert uri.endswith("?mode=ro&immutable=1")
+    assert history.status == "ok" and "Chart the spring tides" in history.titles
+    assert files_under(home) == files and db.read_bytes() == data
+
+
 def test_a_read_only_connection_cannot_write(root):
     conn = standup.connect_ro(root / "state.db")
     try:
@@ -329,6 +375,7 @@ def test_only_titles_are_read_never_message_bodies(root, monkeypatch):
 def test_a_symlinked_state_db_or_profile_folder_is_never_followed(root, tmp_path, monkeypatch):
     outside = tmp_path / "elsewhere"
     seed(outside / "state.db", [("LEAKED TITLE", NOW - HOUR, NOW - HOUR)])
+    personas.write_record(personas.claim_path_of(outside), {"persona": "weston"})
     research = root / "profiles" / "research"
     (research / "state.db").unlink()
     (research / "state.db").symlink_to(outside / "state.db")
@@ -336,11 +383,33 @@ def test_a_symlinked_state_db_or_profile_folder_is_never_followed(root, tmp_path
     linked.symlink_to(outside, target_is_directory=True)
     opened = Opened(monkeypatch)
     made = run(host_for(root, Sidecar(), listed=["research", "linked"]))
-    status = {s["profile"]: (s["status"], s["reason"]) for s in made.segments}
-    assert status["research"] == ("unreadable", "its state.db is a symbolic link")
-    assert status["linked"] == ("unreadable", "its profile folder is a symbolic link")
-    assert opened.uris == [] and opened.touched("elsewhere") == []
+    status = {s["profile"]: (s["status"], s["reason"], s["how"]) for s in made.segments}
+    assert status["research"][:2] == ("unreadable", "its state.db is a symbolic link")
+    # The linked folder: no history and no claim (Weston lives in the target).
+    assert status["linked"] == ("unreadable", "its profile folder is a symbolic link",
+                                "show-only")
+    assert made.segments[1]["persona"] != "Weston"
+    target = outside.resolve()
+    reached = [p for p in opened.paths if Path(p).resolve().is_relative_to(target)]
+    assert opened.uris == [] and reached == []
     assert "LEAKED" not in (made.job / "script.json").read_text()
+
+
+def test_a_linked_profile_folder_never_lends_its_claim(root, monkeypatch):
+    """The review's probe: profiles/coder -> profiles/ops; coder listed, ops not."""
+    ops = root / "profiles" / "ops"
+    seed(ops / "state.db", [("ops secret plan", NOW - HOUR, NOW - HOUR)])
+    personas.write_record(personas.claim_path_of(ops), {"persona": "weston"})
+    coder = root / "profiles" / "coder"
+    coder.rename(root / "coder-real")
+    coder.symlink_to(ops, target_is_directory=True)
+    opened = Opened(monkeypatch)
+    history = standup.read_history(root, "coder", NOW)
+    (cast,) = standup.cast(root, ["coder"])
+    assert (history.status, history.reason) == ("unreadable",
+                                                "its profile folder is a symbolic link")
+    assert cast.how == "show-only" and cast.persona.name != "Weston"
+    assert [p for p in opened.paths if Path(p).resolve().is_relative_to(ops.resolve())] == []
 
 
 def test_a_symlinked_profiles_folder_is_never_followed(tmp_path, monkeypatch):
@@ -349,11 +418,15 @@ def test_a_symlinked_profiles_folder_is_never_followed(tmp_path, monkeypatch):
     outside = tmp_path / "other-profiles"
     seed(outside / "coder" / "state.db", [("LEAKED", NOW - HOUR, NOW - HOUR)])
     (base / "profiles").symlink_to(outside, target_is_directory=True)
+    personas.write_record(personas.claim_path_of(outside / "coder"), {"persona": "weston"})
     opened = Opened(monkeypatch)
     history = standup.read_history(base, "coder", NOW)
     assert (history.status, history.reason) == ("unreadable", "the profiles folder is a "
                                                 "symbolic link")
+    (cast,) = standup.cast(base, ["coder"])
+    assert cast.how == "show-only" and cast.persona.name != "Weston"
     assert opened.uris == []
+    assert [p for p in opened.paths if Path(p).resolve().is_relative_to(outside.resolve())] == []
 
 
 def test_a_missing_or_corrupt_state_db_gets_one_line_and_the_show_goes_on(root):
@@ -362,7 +435,7 @@ def test_a_missing_or_corrupt_state_db_gets_one_line_and_the_show_goes_on(root):
     made = run(host_for(root, Sidecar()))
     status = {s["profile"]: s["status"] for s in made.segments}
     assert status == {"default": "ok", "coder": "unreadable", "research": "missing"}
-    lines = [s["text"] for s in json.loads((made.job / "script.json").read_text())["segments"]]
+    lines = segments_of(made)
     assert lines[1] == "Maya for coder: my history could not be read today."
     assert lines[2].endswith("for research: my history could not be read today.")
     assert "coder (unreadable" in standup.reply(made)
@@ -401,7 +474,7 @@ def test_a_profile_with_no_recent_session_gets_a_quiet_day_line(root):
         {"profile": "default", "text": "Bob here. I triaged the inbox and drafted replies."},
     ]})
     made = run(host_for(root, Sidecar(), llm=llm, listed=["default", "quiet"]))
-    lines = [s["text"] for s in json.loads((made.job / "script.json").read_text())["segments"]]
+    lines = segments_of(made)
     assert lines[1].endswith("for quiet: a quiet day, no sessions in the last day.")
     assert [s["status"] for s in made.segments] == ["ok", "quiet"]
     assert "quiet (quiet day)" in standup.reply(made)
@@ -496,7 +569,7 @@ def test_the_model_writes_each_segment_with_the_titles_fenced_as_data(root):
     assert "Old migration work" not in block and "Plan the week" not in block
     assert "untrusted data" in call["instructions"]
     assert made.script_source == "llm" and made.model == MODEL
-    lines = [s["text"] for s in json.loads((made.job / "script.json").read_text())["segments"]]
+    lines = segments_of(made)
     assert lines[0] == "Bob here. I triaged the inbox and drafted replies."
     persona = made.segments[2]["persona"]
     assert lines[2] == f"{persona} for research. Nothing much to report."
@@ -505,7 +578,7 @@ def test_the_model_writes_each_segment_with_the_titles_fenced_as_data(root):
 def test_a_failed_model_falls_back_to_the_template(root):
     llm = FakeLlm(RuntimeError("429 rate limited"), RuntimeError("429 rate limited"))
     made = run(host_for(root, Sidecar(), llm=llm))
-    lines = [s["text"] for s in json.loads((made.job / "script.json").read_text())["segments"]]
+    lines = segments_of(made)
     assert lines[1] == ("Maya for coder. Coder worked on: Fix the login redirect bug "
                         "and Review the payments refactor.")
     assert made.script_source == "template" and "429" in made.llm_error
@@ -545,11 +618,11 @@ def test_the_show_only_persona_is_deterministic(root):
 
 
 def test_with_a_key_one_free_openrouter_engine_voices_the_whole_show(root):
-    http = FakeHttp(speech={router.FISH_MODEL: [audio(MP3_BYTES)] * 3})
+    http = FakeHttp(speech={router.FISH_MODEL: [audio(MP3_BYTES)] * 5})
     sidecar = Sidecar()
     made = run(host_for(root, sidecar, http=http, environ={"OPENROUTER_API_KEY": KEY}))
     assert made.engine == router.FISH and not made.private_use
-    assert http.posts() == [router.FISH_MODEL] * 3 and sidecar.edge == []
+    assert http.posts() == [router.FISH_MODEL] * 5 and sidecar.edge == []
     assert len({s["voice"] for s in made.segments}) == 3
     assert sidecar.finishes[0]["engine"] == "openrouter"
 
@@ -576,7 +649,7 @@ def test_a_cron_run_is_detected_as_scheduled(root, monkeypatch):
     with pytest.raises(standup.StandupError):
         run(host_for(root, sidecar))
     assert sidecar.edge == []
-    http = FakeHttp(speech={router.FISH_MODEL: [audio(MP3_BYTES)] * 3})
+    http = FakeHttp(speech={router.FISH_MODEL: [audio(MP3_BYTES)] * 5})
     made = run(host_for(root, sidecar, http=http, environ={"OPENROUTER_API_KEY": KEY}))
     assert made.scheduled and made.engine == router.FISH and sidecar.edge == []
 
@@ -610,11 +683,28 @@ def test_the_command_records_the_standup_and_ends_with_media(root):
     assert answer.splitlines()[-1].startswith("MEDIA:") and "Private listening only" in answer
 
 
-def test_standup_followed_by_other_words_is_still_an_episode_text():
-    assert commands._is_standup_command(["standup"])
-    assert commands._is_standup_command(["Standup", "coder", "default"])
-    assert not commands._is_standup_command(["standup", "notes:", "Monday"])
-    assert not commands._is_standup_command(["standups"])
+def test_standup_followed_by_other_words_is_still_an_episode_text(root):
+    host = host_for(root, Sidecar())
+    assert commands._is_standup_command(["standup"], host)
+    assert commands._is_standup_command(["Standup", "coder", "default"], host)
+    # An existing but unlisted profile is the command, so it is refused, not recorded.
+    assert commands._is_standup_command(["standup", "secret"], host)
+    assert not commands._is_standup_command(["standup", "is", "great"], host)
+    assert not commands._is_standup_command(["standup", "coder", "notes"], host)
+    assert not commands._is_standup_command(["standup", "notes:", "Monday"], host)
+    assert not commands._is_standup_command(["standups"], host)
+
+
+def test_onair_standup_is_great_records_an_episode(root, monkeypatch):
+    texts: list[str] = []
+    monkeypatch.setattr(commands, "episode_reply",
+                        lambda host, raw, post=None: texts.append(raw) or "EPISODE")
+    opened = Opened(monkeypatch)
+    handler = commands.make_handler(lambda: root / "plugin-data" / "onair",
+                                    host=host_for(root, Sidecar()))
+    assert handler("standup is great") == "EPISODE" and texts == ["standup is great"]
+    assert opened.uris == []
+    assert handler("standup secret").startswith("On Air standup: not opted in: secret")
 
 
 def test_the_tool_returns_the_reply_or_the_refusal(root):
@@ -665,3 +755,84 @@ def test_the_standup_module_never_writes_a_sibling_profile(root):
     paths_after, mtimes_after = snapshot()
     assert paths_after == paths  # no new file or folder, none removed
     assert mtimes_after == mtimes
+
+
+# ------------------------------------------------------------ review round 1
+
+
+def test_a_speaker_label_is_never_spoken(root):
+    llm = FakeLlm({"segments": [
+        {"profile": "default", "text": "Bob: Triage the inbox and draft replies."},
+        {"profile": "coder", "text": "Maya (coder) - I fixed the login redirect bug."},
+        {"profile": "research", "text": "research: I summarized three papers on tides."},
+    ]})
+    made = run(host_for(root, Sidecar(), llm=llm))
+    lines = segments_of(made)
+    research = made.segments[2]["persona"]
+    assert lines == ["Bob for default. Triage the inbox and draft replies.",
+                     "Maya for coder. I fixed the login redirect bug.",
+                     f"{research} for research. I summarized three papers on tides."]
+    assert "No speaker labels" in llm.calls[0]["instructions"]
+    # A name inside a sentence is kept.
+    cast = standup.Cast("default", personas.BY_ID["bob"], "claim")
+    assert standup.tidy_segment("Bob here. Busy day.", cast) == "Bob here. Busy day."
+
+
+def test_the_template_never_says_redacted(root):
+    db = root / "profiles" / "coder" / "state.db"
+    db.unlink()
+    seed(db, [("Deploy staging with token=abc123secret", NOW - HOUR, NOW - HOUR),
+              ("Fix the login redirect bug", NOW - 2 * HOUR, NOW - 2 * HOUR)])
+    db = root / "profiles" / "research" / "state.db"
+    db.unlink()
+    seed(db, [("Rotate " + "sk-" + "or-v1-" + "a1b2c3d4" * 5, NOW - HOUR, NOW - HOUR)])
+    made = run(host_for(root, Sidecar(), llm=FakeLlm(RuntimeError("x"), RuntimeError("x"))))
+    spoken = " ".join(spoken_of(made)).lower()
+    assert "redacted" not in spoken
+    lines = segments_of(made)
+    assert lines[1] == "Maya for coder. Coder worked on: Fix the login redirect bug."
+    assert lines[2].endswith("Research worked on 1 session it keeps private today.")
+
+
+@pytest.mark.parametrize("text, secret", [
+    ("api key: abc123", "abc123"),
+    ("set the API key to zz9xx-77", "zz9xx-77"),
+    ("Api-Key = qq88", "qq88"),
+    ("the wifi password is hunter2", "hunter2"),
+    ("admin password was Tr0ub4dor", "Tr0ub4dor"),
+    ("secret key: mysecret99", "mysecret99"),
+    ("access key is AKIAFAKE", "AKIAFAKE"),
+])
+def test_spaced_and_prose_secrets_are_scrubbed(text, secret):
+    out = standup.scrub_secrets(text)
+    assert secret not in out, out
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("1", True), ("true", True), ("TRUE", True), ("yes", True), (" on ", True),
+    ("0", False), ("false", False), ("", False), ("no", False),
+])
+def test_in_cron_accepts_hermes_truthy_values(monkeypatch, value, expected):
+    monkeypatch.setenv("HERMES_CRON_SESSION", value)
+    assert standup.in_cron() is expected
+
+
+def test_the_show_opens_and_closes_with_plugin_lines_in_the_first_voice(root):
+    import re as _re
+    sidecar = Sidecar()
+    made = run(host_for(root, sidecar))
+    lines = spoken_of(made)
+    assert _re.fullmatch(r"This is the On Air standup for [A-Z][a-z]+day, \d{1,2} [A-Z][a-z]+: "
+                         r"three agents report\.", lines[0])
+    assert lines[-1] == "That's the standup. Back tomorrow."
+    script = json.loads((made.job / "script.json").read_text())
+    first = script["segments"][0]["speaker"]
+    assert first == script["segments"][1]["speaker"] == script["segments"][-1]["speaker"]
+    # No session content in them, and they are joined (and so in the VTT) like any line.
+    for word in ("Triage", "login", "papers"):
+        assert word not in lines[0] and word not in lines[-1]
+    texts = [part["text"] for part in sidecar.finishes[0]["parts"]]
+    assert texts[0] == lines[0] and texts[-1] == lines[-1]
+    assert standup.opening_line(1, datetime.fromtimestamp(NOW)).endswith("one agent reports.")
+    # Short: 3 agents' segments plus both lines stay under about a minute of speech.
+    assert sum(len(t.split()) for t in lines) <= 150
