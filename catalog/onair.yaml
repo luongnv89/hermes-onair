@@ -1,0 +1,33 @@
+# DRAFT of plugin-catalog/onair.yaml for NousResearch/hermes-agent.
+# Do not submit as is. At submission, Forge replaces the placeholder
+# commit (the 40 zeros in `sha` and in the `image` URL) with the full
+# 40-character commit it pins. The repo must be public by then,
+# so that `repo` can be cloned and `image` can load.
+# Check it with:
+#   python3 scripts/validate_plugin_catalog.py plugin-catalog/onair.yaml
+name: onair
+title: On Air (free voices and audio shows)
+repo: https://github.com/luongnv89/hermes-onair
+sha: "0000000000000000000000000000000000000000"
+description: "Every agent gets a free voice and a show: the onair speech provider (tts.provider: onair) speaks through OpenRouter's free Fish and HeyGen models, price-checked against OpenRouter's public model list before every call, then edge-tts; each profile claims its own voice persona from a pool of 10 (/onair voice, voice list, voice set); /onair <link or text> and the onair_episode tool turn a page or text into a two-host episode (MP3 plus WebVTT transcript, sent as an audio attachment); /onair standup, the onair_standup tool and an onair:standup morning blueprint have each opted-in profile report its last 24 hours in its own voice; hermes onair setup installs the audio engine. Disclosure — Never calls a paid model of its own (scripts run on your own configured model, so that cost follows your choice): OpenRouter is used only with OPENROUTER_API_KEY in the environment, only for models listed as free (the free Fish and HeyGen models are promotions that may end), and otherwise speech falls back to edge-tts, an unofficial Microsoft Edge read-aloud client whose output is for the requesting user's private use only (scheduled standups never use it). Sends the text to speak to OpenRouter or Microsoft, and the source text or session titles to that model through ctx.llm (auxiliary task onair_script, reasoning off by default, no model override). /onair <link> fetches that page. hermes onair setup runs uv to create a sidecar virtualenv and installs DropCast from GitHub over git+ssh at a pinned commit, with its dependencies from PyPI (uv may also download a Python and uses its own cache); episodes and edge-tts speech run the sidecar's Python (DropCast) and ffmpeg as child processes. The standup reads only profiles listed in the standup_profiles setting: each one's state.db is opened read-only for the titles and summaries of its last 24 hours of sessions (never messages), with secret-looking strings removed first. To keep voices distinct, any profile reads (never writes) the other profiles' persona claim files. Writes only the requested speech files and its own plugin-data folder (sidecar, episodes, persona claim, a 24 h model-list cache). No background service, no stored credentials, no telemetry."
+maintainer: luongnv89
+tier: community
+category: voice
+docs_url: https://github.com/luongnv89/hermes-onair#readme
+version: "0.1.0"
+image: https://raw.githubusercontent.com/luongnv89/hermes-onair/0000000000000000000000000000000000000000/assets/catalog-card.png
+readme: true
+platforms: [linux, macos]
+known_issues:
+  - "hermes onair setup needs uv and a working ssh -T git@github.com: it installs DropCast over git+ssh."
+  - "The free OpenRouter voices (Fish S2.1 Pro, HeyGen voice 1 turbo) are promotions that may end; On Air then skips them and speaks with edge-tts, for private use only."
+  - "HeyGen voices and non-MP3 speech formats need ffmpeg."
+  - "Free script models often answer HTTP 429; the episode then uses a built-in template and says so."
+  - "In-process only (it uses ctx.post_message): under plugins.isolation: host, Hermes skips the hermes onair terminal command."
+capabilities:
+  provides_tools:
+    - onair_episode
+    - onair_standup
+  provides_hooks: []
+  provides_middleware: []
+  requires_env: []
