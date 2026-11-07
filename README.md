@@ -27,7 +27,8 @@
 
 ## Quick start
 
-**You need:** Hermes Agent,
+**You need:** Hermes Agent set up with a model (`hermes setup`; On Air's
+scripts are written by that model),
 [uv](https://docs.astral.sh/uv/getting-started/installation/) on `PATH`, and
 `ssh -T git@github.com` working on this machine. Setup installs DropCast over
 `git+ssh`, and the GitHub account must be able to read
@@ -36,7 +37,8 @@ enables HeyGen voices and non-MP3 output. Hermes's managed ffmpeg in
 `~/.hermes/tools` is found on its own.
 
 ```sh
-# 1. Install and enable the plugin (or: hermes plugins install luongnv89/hermes-onair --enable).
+# 1. Install and enable the plugin. Once the repo is public,
+#    `hermes plugins install luongnv89/hermes-onair --enable` works too.
 hermes plugins install git@github.com:luongnv89/hermes-onair.git --enable
 
 # 2. Create the sidecar and install the pinned DropCast (about a minute).
@@ -58,12 +60,13 @@ Then, in any Hermes chat (CLI, TUI, Telegram, Discord, …):
 ```
 
 The episode arrives about a minute later as an audio attachment, with its
-transcript.
+transcript. From a shell, `hermes chat -q "/onair voice"` runs one command
+and exits. On the CLI, the reply's last line is the MP3's path.
 
 - **Restart a running gateway** (`hermes gateway restart`) after installing,
   so it loads the plugin.
-- **Check the install** with `hermes plugins list` (onair: enabled) and
-  `hermes onair setup --check`.
+- **Check the install** with `hermes plugins list` (onair shows as
+  `enabled`), `hermes plugins doctor onair` and `hermes onair setup --check`.
 - **`hermes onair setup` is safe to run again.** A sidecar already at the pin
   is left alone. The sidecar lives in `$HERMES_HOME/plugin-data/onair/sidecar`.
 - **Update** with `hermes plugins update onair`, then `hermes onair setup`.
@@ -237,6 +240,7 @@ reply says so.
 
 | You see | Do this |
 |---------|---------|
+| `Hermes isn't configured yet -- no API keys or providers found` | Hermes has no model yet. Run `hermes setup`. |
 | `/onair` is an unknown command | Run `hermes plugins list`. If onair shows as disabled, run `hermes plugins enable onair`. Then restart the gateway or start a new chat. |
 | `the sidecar is not set up: run hermes onair setup first` | Run `hermes onair setup`, then `hermes onair setup --check`. |
 | `✗ uv not found` | Install uv, or set `plugins.entries.onair.settings.uv_bin` to its path. |
@@ -359,10 +363,12 @@ pytest -m live       # by hand only: tests that reach real services
   `OPENROUTER_API_KEY=... pytest -m live tests/test_live.py -v -s`. Add
   `-k persona` to try every persona's voices (7 + 10 free requests).
 - Try the plugin in an isolated `HERMES_HOME` outside `~/.hermes`, for
-  example `HERMES_HOME=/tmp/onair-home`. Run `hermes pm repair` once in a
-  new home before any other `hermes` command, then follow the
-  [Quick start](#quick-start). Homes inside `~/.hermes` share the real
-  install.
+  example `HERMES_HOME=/tmp/onair-home`, and follow the
+  [Quick start](#quick-start). A new home has no model yet: run
+  `hermes setup` there, or point `model.*` at a local endpoint. The
+  [Quick start](#quick-start)'s first command prepares the home's runtime. If
+  another command in a new home asks for `hermes pm repair`, run that once.
+  Homes inside `~/.hermes` share the real install.
 - Before a PR, run `hermes plugins validate .` and
   `hermes plugins doctor . --ci` in that isolated home.
 - CI runs ruff and the offline tests on Python 3.11 and 3.13.

@@ -23,6 +23,7 @@ known_issues:
   - "The free OpenRouter voices (Fish S2.1 Pro, HeyGen voice 1 turbo) are promotions that may end; On Air then skips them and speaks with edge-tts, for private use only."
   - "HeyGen voices and non-MP3 speech formats need ffmpeg."
   - "Free script models often answer HTTP 429; the episode then uses a built-in template and says so."
+  - "In-process only (it uses ctx.post_message): under plugins.isolation: host, Hermes skips the hermes onair terminal command."
 capabilities:
   provides_tools:
     - onair_episode
